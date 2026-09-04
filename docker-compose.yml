@@ -1,0 +1,19 @@
+services:
+  screening-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sih_document_screening_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - LOG_LEVEL=info
+    volumes:
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
