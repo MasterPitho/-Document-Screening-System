@@ -1,7 +1,6 @@
 """
 AI-Based Fake Identity & Document Screening System
-Smart India Hackathon 2026 - Problem Statement 26188
-Ministry of Home Affairs / SSB
+
 """
 
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
