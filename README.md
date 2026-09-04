@@ -1,6 +1,4 @@
 # AI-Based Fake Identity & Document Screening System
-**Smart India Hackathon (SIH) 2026 | Problem Statement: 26188**
-**Organization:** Ministry of Home Affairs | Sashastra Seema Bal (SSB), Police II Division
 
 ---
 
