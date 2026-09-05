@@ -674,17 +674,22 @@ def _line2_with_expiry(expiry):
 
 
 def test_mrz_year_pivot_decoding():
-    assert main._mrz_year_full(69) == 2069
-    assert main._mrz_year_full(70) == 1970
-    assert main._mrz_year_full(70, pivot=50) == 1970
+    # Default pivot semantics: 00-49 -> 2000s, 50-99 -> 1900s.
+    assert main._mrz_year_full(0) == 2000
+    assert main._mrz_year_full(49) == 2049
+    assert main._mrz_year_full(50) == 1950
+    assert main._mrz_year_full(99) == 1999
+    # An explicit pivot still overrides the default.
+    assert main._mrz_year_full(69, pivot=70) == 2069
+    assert main._mrz_year_full(70, pivot=70) == 1970
     assert main._mrz_year_full(49, pivot=50) == 2049
 
 
 def test_mrz_expiry_uses_pivot_year():
-    future = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("510101"))
+    future = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("490101"))
     assert future["status"] == "VALID"
     assert future["is_expired"] is False
-    past = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("710101"))
+    past = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("500101"))
     assert past["status"] == "VALID"
     assert past["is_expired"] is True
 

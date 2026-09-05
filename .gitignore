@@ -3,8 +3,15 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
 .idea/
 .vscode/
 .DS_Store

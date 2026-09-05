@@ -65,7 +65,7 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `MRZ_CONFIDENCE_THRESHOLD` | `0.70` | |
 | `FACE_MATCH_THRESHOLD` | `0.60` | Legacy alias: `FACE_SIMILARITY_THRESHOLD`. |
 | `TAMPERING_THRESHOLD` | `60` | |
-| `MRZ_YEAR_PIVOT` | `70` | Years below the pivot decode as 20xx, at/above as 19xx. |
+| `MRZ_YEAR_PIVOT` | `50` | Two-digit years decode as 20xx when below the pivot, 19xx at/above it (00–49 → 2000–2049, 50–99 → 1950–1999). |
 | `RISK_REVIEW_THRESHOLD` | `35` | Legacy alias: `RISK_MEDIUM_THRESHOLD`. |
 | `RISK_REJECT_THRESHOLD` | `65` | Legacy alias: `RISK_HIGH_THRESHOLD`. |
 | `RISK_TAMPERING` | `40` | Weight for tampering-suspected signals. |
@@ -94,7 +94,7 @@ Multipart form fields:
 - `mrz_line1`: optional exact TD3 line 1.
 - `mrz_line2`: optional exact TD3 line 2.
 
-Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR.
+Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path) and never silently promoted to OCR-verified data. An INVALID/MALFORMED manual MRZ still forces secondary inspection.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/screen \
@@ -161,7 +161,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The suite (43 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, OCR failure and candidate rejection, tamper statuses including inconclusive handling, structured error bodies, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images), the fail-safe decision gate, and deterministic face bounding-box reporting.
+The suite (65 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, tamper statuses including INCONCLUSIVE handling and the missing-weight regression, structured error bodies, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, decompression-bomb protection), fail-safe and high-risk decision gates, deterministic face bounding-box reporting, and safe handling of unexpected internal errors.
 
 ## Security and Privacy
 

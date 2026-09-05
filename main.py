@@ -103,7 +103,7 @@ class Settings:
             face_similarity_threshold=_float("FACE_MATCH_THRESHOLD",
                                              _float("FACE_SIMILARITY_THRESHOLD", 0.60)),
             tampering_threshold=_float("TAMPERING_THRESHOLD", 60.0),
-            mrz_year_pivot=_int("MRZ_YEAR_PIVOT", 70),
+            mrz_year_pivot=_int("MRZ_YEAR_PIVOT", 50),
             risk_review_threshold=_int("RISK_REVIEW_THRESHOLD", _int("RISK_MEDIUM_THRESHOLD", 35)),
             risk_reject_threshold=_int("RISK_REJECT_THRESHOLD", _int("RISK_HIGH_THRESHOLD", 65)),
             risk_weights={
@@ -136,6 +136,9 @@ TAMPERING_THRESHOLD = settings.tampering_threshold
 MRZ_YEAR_PIVOT = settings.mrz_year_pivot
 RISK_THRESHOLDS = (settings.risk_review_threshold, settings.risk_reject_threshold)
 RISK_WEIGHTS = settings.risk_weights
+# Fail-safe fallback weight used if a factor referenced by the risk engine is
+# ever absent from RISK_WEIGHTS. Screening must never crash with a KeyError.
+DEFAULT_RISK_WEIGHT = 10
 
 
 def _validate_configuration() -> None:
@@ -992,7 +995,9 @@ async def screen_document(
 
     def add_factor(name: str, detail: str) -> None:
         nonlocal risk_score
-        weight = RISK_WEIGHTS[name]
+        if name not in RISK_WEIGHTS:
+            logger.warning("missing_risk_weight factor=%s fallback=%s", name, DEFAULT_RISK_WEIGHT)
+        weight = RISK_WEIGHTS.get(name, DEFAULT_RISK_WEIGHT)
         risk_score += weight
         risk_factors.append({"factor": name, "weight": weight, "detail": detail})
 
@@ -1032,7 +1037,7 @@ async def screen_document(
     # NOT_AVAILABLE module state (or any risk factor) forbids CLEAR.
     module_clear_ok = not _has_blocking_module_state(module_statuses)
 
-    risk_score = min(100, risk_score)
+    risk_score = max(0, min(100, risk_score))
     if risk_score >= RISK_THRESHOLDS[1]:
         risk_level = "HIGH_RISK"
     elif risk_score >= RISK_THRESHOLDS[0]:
