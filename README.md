@@ -7,7 +7,7 @@ An explainable **Smart India Hackathon prototype** for document screening. It va
 - TD3 passport MRZ: two 44-character lines, ICAO 9303 7-3-1 checks for document number, date of birth, expiry, and composite data, plus impossible-date and pivot-year expiry validation.
 - Automatic MRZ OCR via Tesseract when the caller omits the MRZ form fields.
 - Multi-signal image-forensics analysis: ELA, JPEG compression, noise, edge, lightweight copy-move (duplicate-region), and metadata presence. These are heuristic indicators, not a forgery classifier.
-- Face verification with InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime). The model is downloaded once at startup (or baked into the Docker image) and compares a document face to an optional live photo.
+- Face verification with InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime). Detection is SCRFD (InsightFace `FaceAnalysis`), faces are aligned, and the L2-normalized ArcFace embeddings of the document face and an optional live photo are compared by cosine similarity; **exactly one** face per image is accepted (extra/missing/low-confidence faces are reported, never guessed). The model is downloaded once at startup (or baked into the Docker image).
 - Explainable risk score: weighted factors with explicit, documented weights. Weights are heuristic prototype values, not calibrated probabilities.
 
 ## Processing Pipeline
@@ -21,6 +21,24 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
     -> Deterministic, explainable risk engine (weights, module gates)
     -> PostgreSQL-backed privacy-preserving audit record (SQLAlchemy + Alembic)
 ```
+
+## Architecture and Package Layout
+
+`app/` is the FastAPI application package. `create_app()` builds the app, its configuration, and every runtime singleton, then exposes them through `request.app.state` — components are never created at module import time (which keeps the test suite DB-independent and import-safe).
+
+- `app/main.py` — app factory and lifespan (retrying database bring-up, admin bootstrap from env vars, face-model load), plus all HTTP routes: `GET /health`, `GET /ready`, `POST /api/v1/screen`, `POST /api/v1/auth/register|login|logout`, `GET /api/v1/auth/me`, `GET /api/v1/screenings` (list + filters), `GET /api/v1/screenings/{id_or_request_id}`, `GET /api/v1/screenings/{id_or_request_id}/factors`, `GET /api/v1/stats`, `GET /api/v1/report/summary`.
+- `app/config.py` — pydantic `Settings` loaded from the environment plus the cached `get_settings()`.
+- `app/db/` — persistence layer:
+  - `database.py` — the `Database` engine/session factory (`build_database`), `ping()` readiness probe, retrying `DatabaseConnector`, UTC clock helpers, and the `get_db` FastAPI dependency.
+  - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`) with indexes.
+  - `repositories.py` — the only module that opens sessions; one short-lived session per operation (`ScreeningRepository`, `AuditLogRepository`, `UserRepository`, `AuthTokenRepository`).
+- `app/api/` — `auth.py` (register/login/logout/me, bearer-token helpers, `extract_optional_user` for anonymous screenings) and `helpers.py` (shared request utilities).
+- `app/services/` — `mrz.py` (TD3 parser + Tesseract OCR), `tampering.py` (multi-signal forensics), `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests), `risk_engine.py` (weighted deterministic scoring).
+- `app/security/image_validation.py` — upload hardening (byte size, MIME, extension, signature, pixel count, dimensions).
+- `app/models/schemas.py` — Pydantic request/response models.
+- `database.py` (repo root) — a backward-compatible shim re-exporting the `app.db` models plus `engine`/`SessionLocal`/`get_db`/`init_db` so legacy tooling imports keep working.
+
+`alembic/` holds the migration environment; the initial revision `eb993e3a880b` creates the schema and is applied automatically on container start via `alembic upgrade head`.
 
 ## Run With Docker
 
@@ -97,7 +115,7 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `ALLOWED_IMAGE_EXTENSIONS` | `jpg,jpeg,png,webp` | File-name extension whitelist. |
 | `MRZ_CONFIDENCE_THRESHOLD` | `0.70` | |
 | `FACE_MATCH_THRESHOLD` | `0.35` | Legacy alias: `FACE_SIMILARITY_THRESHOLD`. |
-| `FACE_MIN_DETECTION_CONFIDENCE` | `0.50` | RetinaFace detection score cutoff. |
+| `FACE_MIN_DETECTION_CONFIDENCE` | `0.50` | Face-detection score cutoff (InsightFace detector confidence). |
 | `FACE_MODEL_NAME` | `buffalo_sc` | InsightFace model pack. |
 | `FACE_DET_SIZE` | `640` | Detection input size. |
 | `FACE_CTX_ID` | `-1` | `-1` = CPU. |
@@ -276,6 +294,18 @@ The suite (123 tests) covers valid/malformed MRZ, all checksum failures, pivot-y
 - `live_photo` and `document_image` files are always closed after reading.
 - CORS origins are configurable; no wildcard-plus-credentials combination is used.
 - The Docker process runs as a non-root user with a healthcheck.
+
+## Production Readiness
+
+**In place:** non-root Docker user, migration-driven schema (`alembic upgrade head` on container start), DB-aware `/ready` healthcheck that gates container health, a structured error format that never leaks stack traces, operator accounts with PBKDF2-hashed passwords and hashed bearer tokens, a privacy-preserving audit trail, upload hardening, and controlled degraded behavior (503 `DATABASE_UNAVAILABLE`, face `NOT_AVAILABLE`) instead of crashes.
+
+**Honest gaps before operational deployment:**
+
+- The API runs a single uvicorn worker with an in-process face-model cache. Scaling out requires a worker manager (e.g. `--workers N`/gunicorn) and shared read-only model artifacts.
+- No TLS by default — the API is expected to sit behind a TLS-terminating reverse proxy.
+- No per-operator rate limiting, account lockout, or multi-factor authentication.
+- The base Docker image still carries two Debian-package HIGH CVEs (`zlib` CVE-2026-85091, `libxml2` CVE-2026-86140) that have no upstream fix yet; the Dockerfile's `apt-get upgrade` picks them up automatically on the next rebuild once Debian ships patches.
+- Face-match thresholds and risk weights are heuristic prototype values; they must be calibrated against labeled data before any enforcement decision.
 
 ## Limitations
 
