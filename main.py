@@ -22,7 +22,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 logger = logging.getLogger("document_screening")
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
 MAX_IMAGE_BYTES = int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
