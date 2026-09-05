@@ -10,8 +10,6 @@ services:
     environment:
       - PORT=8000
       - LOG_LEVEL=info
-    volumes:
-      - .:/app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

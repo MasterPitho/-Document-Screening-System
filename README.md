@@ -38,6 +38,7 @@ Open:
 - Health: `http://localhost:8000/health`
 
 The container accepts only JPG, PNG, and WebP uploads, with a 10 MB limit per image. Docker build verification requires Docker Desktop or another Docker engine to be installed and running.
+The default Compose service runs the built image directly; it does not bind-mount the host source tree over `/app`.
 
 ## Run Locally
 
@@ -82,6 +83,7 @@ The response contains the recommended top-level fields and a `modules` compatibi
 ```json
 {
   "status": "SCREENED",
+  "request_id": "b7f4d1c7b6f54f9e9c2be6ccf7f1e2a1",
   "risk_assessment": {
     "score": 20,
     "status": "YELLOW",
@@ -115,7 +117,9 @@ The response contains the recommended top-level fields and a `modules` compatibi
 }
 ```
 
-Important states include `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `MATCH`, `MISMATCH`, `NO_FACE_IN_DOCUMENT`, `NO_FACE_IN_LIVE_PHOTO`, `MULTIPLE_FACES`, `INVALID_IMAGE`, and `SKIPPED_NO_LIVE_PHOTO`.
+Every screening factor also appears in `risk_assessment.reasons`. Module failures return explicit states such as `ANALYSIS_ERROR` or `ERROR` and create a review factor; they are never converted into `CLEARED`.
+
+Important states include `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `OCR_FAILED`, `OCR_LOW_CONFIDENCE`, `MATCH`, `MISMATCH`, `NO_FACE_IN_DOCUMENT`, `NO_FACE_IN_LIVE_PHOTO`, `MULTIPLE_FACES`, `LOW_CONFIDENCE`, `INVALID_IMAGE`, `ERROR`, and `SKIPPED_NO_LIVE_PHOTO`.
 
 An MRZ checksum means the MRZ data is internally consistent. It does not prove that a passport is authentic. A skipped face check is not a match. An ELA or edge anomaly is a screening signal, not proof of forgery.
 

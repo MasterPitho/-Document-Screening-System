@@ -10,6 +10,7 @@ import datetime
 import logging
 import os
 import time
+import uuid
 from typing import Any, Optional
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
@@ -86,8 +87,10 @@ class TamperingResult(BaseModel):
     edge_artifact_score: float
     metadata_present: bool
     confidence: float = Field(ge=0.0, le=100.0)
+    tampering_score: float = Field(default=0.0, ge=0.0, le=100.0)
     is_tampered: bool
     signals: list[str] = Field(default_factory=list)
+    explanation: str = ""
 
 
 class RiskAssessment(BaseModel):
@@ -96,6 +99,7 @@ class RiskAssessment(BaseModel):
     level: str
     decision: str
     factors: list[dict[str, Any]]
+    reasons: list[str]
     explanation: str
 
 
@@ -108,6 +112,7 @@ class ScreeningModules(BaseModel):
 class ScreenResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
+    request_id: str
     risk_assessment: RiskAssessment
     modules: ScreeningModules
     processing_time_ms: int
@@ -149,6 +154,34 @@ def _validate_image_bytes(image_bytes: bytes, content_type: Optional[str], label
         raise HTTPException(status_code=413, detail=f"{label} dimensions are unsafe.") from error
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"{label} is invalid or unreadable.") from error
+
+
+def _tampering_error(error: Exception) -> dict[str, Any]:
+    logger.warning("tampering_analysis_error type=%s", type(error).__name__)
+    return {
+        "status": "ANALYSIS_ERROR",
+        "ela_mean_intensity": 0.0,
+        "ela_std_dev": 0.0,
+        "edge_artifact_score": 0.0,
+        "metadata_present": False,
+        "confidence": 0.0,
+        "tampering_score": 0.0,
+        "is_tampered": False,
+        "signals": ["ANALYSIS_ERROR"],
+        "explanation": "Tampering analysis was unavailable; secondary inspection is required.",
+    }
+
+
+def _face_error(error: Exception) -> dict[str, Any]:
+    logger.warning("face_verification_error type=%s", type(error).__name__)
+    return {
+        "status": "ERROR",
+        "match_status": "ERROR",
+        "face_detected_in_document": False,
+        "face_detected_in_live": None,
+        "similarity_score": None,
+        "error": "Face verification was unavailable.",
+    }
 
 # -------------------------------------------------------------
 # Module 1 & 2: ICAO Doc 9303 Checksum & Parser
@@ -209,7 +242,7 @@ def _mrz_structure_valid(line1: str, line2: str) -> bool:
         and len(line2) == 44
         and _valid_mrz_chars(line1)
         and _valid_mrz_chars(line2)
-        and line1[0] in {"P", "V"}
+        and line1[0] == "P"
         and line1[2:5].isalpha()
         and line2[10:13].isalpha()
         and line2[13:19].isdigit()
@@ -329,16 +362,17 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
         ]
         candidates: list[str] = []
         for variant in variants:
-            ocr_text = pytesseract.image_to_string(
-                variant,
-                config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
-            )
-            candidates.extend(_ocr_candidates(ocr_text))
+            for page_mode in (6, 7, 11):
+                ocr_text = pytesseract.image_to_string(
+                    variant,
+                    config=f"--psm {page_mode} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
+                )
+                candidates.extend(_ocr_candidates(ocr_text))
     except Exception as error:
         return {
             "detected": False,
             "source": "ocr",
-            "status": "NOT_DETECTED",
+            "status": "OCR_FAILED",
             "confidence": 0.0,
             "reason": f"MRZ OCR unavailable: {error}",
         }
@@ -365,7 +399,7 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
 
     score, line1, line2, parsed = max(scored_pairs, key=lambda item: item[0])
     if score < MRZ_CONFIDENCE_THRESHOLD:
-        return {"detected": False, "source": "ocr", "status": "NOT_DETECTED",
+        return {"detected": False, "source": "ocr", "status": "OCR_LOW_CONFIDENCE",
                 "confidence": round(score, 3), "reason": "Unable to extract a structurally valid TD3 MRZ."}
     return {
         "detected": True,
@@ -429,7 +463,13 @@ def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, An
         "metadata_present": metadata_present,
         "is_tampered": tamper_detected,
         "confidence": confidence,
+        "tampering_score": confidence,
         "signals": signals,
+        "explanation": (
+            "Potential image manipulation signals detected; secondary inspection is recommended."
+            if tamper_detected
+            else "No significant anomaly crossed the configured prototype thresholds."
+        ),
     }
 
 # -------------------------------------------------------------
@@ -468,13 +508,13 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     if hasattr(face_cascade, "empty") and face_cascade.empty():
         return {
             "face_detected_in_document": False,
-            "status": "INVALID_IMAGE",
-            "match_status": "FACE_CASCADE_LOAD_FAILED",
+            "status": "ERROR",
+            "match_status": "ERROR",
             "similarity_score": None
         }
 
     doc_gray: Any = cv2.cvtColor(doc_img, cv2.COLOR_BGR2GRAY)  # type: ignore[call-overload]
-    doc_faces: Any = face_cascade.detectMultiScale(doc_gray, scaleFactor=1.1, minNeighbors=4)
+    doc_faces: Any = face_cascade.detectMultiScale(doc_gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
 
     if len(doc_faces) == 0:
         return {
@@ -493,6 +533,13 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         }
 
     (x, y, w, h) = doc_faces[0]
+    if min(w, h) < 40:
+        return {
+            "face_detected_in_document": True,
+            "status": "LOW_CONFIDENCE",
+            "match_status": "LOW_CONFIDENCE",
+            "similarity_score": None,
+        }
     doc_face_crop = cv2.resize(doc_gray[y:y+h, x:x+w], (150, 150))
 
     if not live_bytes:
@@ -517,7 +564,7 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         }
 
     live_gray: Any = cv2.cvtColor(live_img, cv2.COLOR_BGR2GRAY)  # type: ignore[call-overload]
-    live_faces: Any = face_cascade.detectMultiScale(live_gray, scaleFactor=1.1, minNeighbors=4)
+    live_faces: Any = face_cascade.detectMultiScale(live_gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40))
 
     if len(live_faces) == 0:
         return {
@@ -537,6 +584,14 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         }
 
     (lx, ly, lw, lh) = live_faces[0]
+    if min(lw, lh) < 40:
+        return {
+            "face_detected_in_document": True,
+            "face_detected_in_live": True,
+            "status": "LOW_CONFIDENCE",
+            "match_status": "LOW_CONFIDENCE",
+            "similarity_score": None,
+        }
     live_face_crop = cv2.resize(live_gray[ly:ly+lh, lx:lx+lw], (150, 150))
 
     doc_embedding = _face_embedding(doc_face_crop)
@@ -563,7 +618,8 @@ async def screen_document(
     mrz_line2: Optional[str] = Form(None)
 ) -> dict[str, object]:
     started_at = time.perf_counter()
-    logger.info("screen_request_received")
+    request_id = uuid.uuid4().hex
+    logger.info("screen_request_received request_id=%s", request_id)
     doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
     live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1) if live_photo else None
     _validate_image_bytes(doc_bytes, document_image.content_type, "Document image")
@@ -571,10 +627,16 @@ async def screen_document(
         _validate_image_bytes(live_bytes, live_photo.content_type, "Live photo")
 
     # 1. Tampering detection
-    tamper_result = analyze_tampering_ela(doc_bytes)
+    try:
+        tamper_result = analyze_tampering_ela(doc_bytes)
+    except Exception as error:
+        tamper_result = _tampering_error(error)
 
     # 2. Face verification
-    face_result = extract_and_verify_faces(doc_bytes, live_bytes)
+    try:
+        face_result = extract_and_verify_faces(doc_bytes, live_bytes)
+    except Exception as error:
+        face_result = _face_error(error)
 
     # 3. MRZ validation: use submitted lines, otherwise read the image automatically.
     mrz_result: dict[str, object]
@@ -604,11 +666,13 @@ async def screen_document(
 
     if tamper_result["is_tampered"]:
         add_factor("TAMPERING_SUSPECTED", "Multiple image-forensics signals exceeded prototype thresholds.")
+    elif tamper_result.get("status") == "ANALYSIS_ERROR":
+        add_factor("TAMPERING_SUSPECTED", "Tampering analysis failed and requires secondary inspection.")
 
     face_status = face_result.get("status")
     if face_status == "MISMATCH":
         add_factor("FACE_MISMATCH", "The document and live face prototype vectors did not meet the threshold.")
-    elif face_status in {"NO_FACE_IN_DOCUMENT", "NO_FACE_IN_LIVE_PHOTO", "MULTIPLE_FACES", "INVALID_IMAGE"}:
+    elif face_status in {"NO_FACE_IN_DOCUMENT", "NO_FACE_IN_LIVE_PHOTO", "MULTIPLE_FACES", "INVALID_IMAGE", "LOW_CONFIDENCE", "ERROR"}:
         add_factor("FACE_NOT_DETECTED", f"Face verification state: {face_status}.")
     elif face_status == "SKIPPED_NO_LIVE_PHOTO":
         risk_factors.append({"factor": "FACE_VERIFICATION_SKIPPED", "weight": 0,
@@ -644,17 +708,20 @@ async def screen_document(
         status_color = "GREEN"
 
     processing_time_ms = int((time.perf_counter() - started_at) * 1000)
-    logger.info("screen_request_completed status=%s risk_score=%s processing_time_ms=%s",
-                risk_level, risk_score, processing_time_ms)
+    reasons = [factor["detail"] for factor in risk_factors]
+    logger.info("screen_request_completed request_id=%s status=%s risk_score=%s processing_time_ms=%s",
+                request_id, risk_level, risk_score, processing_time_ms)
 
     response: dict[str, object] = {
         "status": "SCREENED",
+        "request_id": request_id,
         "risk_assessment": {
             "score": risk_score,
             "status": status_color,
             "level": risk_level,
             "decision": decision,
             "factors": risk_factors,
+            "reasons": reasons,
             "explanation": "Heuristic screening signals require human review; they do not prove authenticity or forgery.",
         },
         "modules": {

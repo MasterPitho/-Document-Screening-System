@@ -71,7 +71,20 @@ def test_ocr_failure_is_safe(monkeypatch):
     monkeypatch.setattr(main.pytesseract, "image_to_string", fail)
     result = main.extract_mrz_from_image(jpeg_bytes())
     assert result["detected"] is False
+    assert result["status"] == "OCR_FAILED"
     assert "tesseract unavailable" in result["reason"]
+
+
+def test_ocr_low_confidence_is_not_valid(monkeypatch):
+    weak_line1 = VALID_LINE1.replace("P", "V", 1)
+    monkeypatch.setattr(
+        main.pytesseract,
+        "image_to_string",
+        lambda *args, **kwargs: f"{weak_line1}\n{VALID_LINE2[:-1]}9",
+    )
+    result = main.extract_mrz_from_image(jpeg_bytes())
+    assert result["detected"] is False
+    assert result["status"] in {"NOT_DETECTED", "OCR_LOW_CONFIDENCE"}
 
 
 def test_tampering_result_is_multi_signal():
@@ -101,6 +114,9 @@ def test_api_returns_screened_schema():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "SCREENED"
+    assert len(body["request_id"]) == 32
+    assert body["risk_assessment"]["decision"] == "SECONDARY_INSPECTION_REQUIRED"
+    assert any(factor["factor"] == "MRZ_NOT_DETECTED" for factor in body["risk_assessment"]["factors"])
     assert body["face_verification"]["similarity_score"] is None or isinstance(
         body["face_verification"]["similarity_score"], float
     )
