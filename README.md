@@ -30,7 +30,7 @@ Docker installs the Tesseract executable, ONNX/runtime dependencies, bakes the f
 docker compose up --build
 ```
 
-The `db` service is a `postgres:16-alpine` container reachable at `db:5432`; the API waits for its `pg_isready` healthcheck before starting. On container start the API runs `alembic upgrade head` (Alembic migrations) and then uvicorn. Data persists in the `postgres-data` volume. TLS and hardened admin credentials are deployment-time concerns.
+The `db` service is a `postgres:16-alpine` container reachable inside the network at `db:5432` and published on the host at `localhost:5432` (so `psql` and the example `DATABASE_URL` work locally); the API waits for its `pg_isready` healthcheck before starting. On container start the API runs `alembic upgrade head` (Alembic migrations) and then uvicorn. Container health is gated on `/ready`, which requires both the face model and a live database connection. Data persists in the `postgres-data` volume. TLS and hardened admin credentials are deployment-time concerns.
 
 Open:
 

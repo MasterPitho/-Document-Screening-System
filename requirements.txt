@@ -27,3 +27,9 @@ psycopg[binary]==3.3.5
 insightface==1.0.1
 onnx==1.22.0
 onnxruntime==1.29.0
+
+# --- Security-transitive pins --------------------------------------------------
+# Transitive dependencies flagged by vulnerability scanning (Docker Scout).
+# Pinned to patched versions; please keep them bumped.
+setuptools>=78.1.1
+msgpack>=1.2.1

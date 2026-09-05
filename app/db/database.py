@@ -14,9 +14,12 @@ reports ``/ready`` as not ready instead of crashing the API.
 
 from __future__ import annotations
 
+import datetime
 import time
-from typing import Optional
+from collections.abc import Callable, Generator
+from typing import Any, Optional
 
+from fastapi import Request
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,22 +27,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.db.models import Base
 
 
-def utcnow() -> "object":
+def utcnow() -> datetime.datetime:
     """UTC-aware clock value used for record timestamps."""
-    import datetime
-
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def utcnow_naive() -> "object":
+def utcnow_naive() -> datetime.datetime:
     """UTC now without timezone info.
 
     Stored as the canonical ``created_at`` value. On SQLite the persisted
     string has no offset; on PostgreSQL the column is ``timestamptz`` and the
     session timezone is UTC, so naive-UTC values are interpreted correctly.
     """
-    value = utcnow()
-    return value.replace(tzinfo=None)
+    return utcnow().replace(tzinfo=None)
 
 
 def is_postgres_url(url: str) -> bool:
@@ -54,11 +54,10 @@ class Database:
         url: str,
         *,
         connect_timeout_s: int = 5,
-        pool_options: Optional[dict] = None,
+        pool_options: Optional[dict[str, Any]] = None,
     ) -> None:
         self.url = url
-        connect_args: dict[str, object] = {}
-        options: dict[str, object] = {
+        options: dict[str, Any] = {
             "echo": False,
             "future": True,
         }
@@ -73,16 +72,15 @@ class Database:
             options["connect_args"] = {"connect_timeout": connect_timeout_s}
         else:
             # SQLite is per-thread; the FastAPI test client runs in threads.
-            connect_args["check_same_thread"] = False
-            options["connect_args"] = connect_args
+            options["connect_args"] = {"check_same_thread": False}
 
-        self.engine: Engine = create_engine(url, **options)  # type: ignore[arg-type]
-        self._session_factory = sessionmaker(
+        self.engine: Engine = create_engine(url, **options)
+        self._session_factory: sessionmaker[Session] = sessionmaker(
             bind=self.engine, autoflush=False, autocommit=False, future=True,
         )
 
     # -- sessions ---------------------------------------------------------
-    def session_factory(self) -> sessionmaker:
+    def session_factory(self) -> sessionmaker[Session]:
         return self._session_factory
 
     def session(self) -> Session:
@@ -90,7 +88,11 @@ class Database:
 
     # -- schema -----------------------------------------------------------
     def create_all(self, fail_silently: bool = False) -> bool:
-        """Create tables from model metadata. Never raises on failure by default."""
+        """Create tables from model metadata.
+
+        Returns True on success. With ``fail_silently=True`` a failure returns
+        False instead of raising; otherwise the underlying exception surfaces.
+        """
         try:
             Base.metadata.create_all(bind=self.engine)
             return True
@@ -119,7 +121,7 @@ def build_database(
     database_url: str,
     *,
     connect_timeout_s: Optional[int] = None,
-    pool_options: Optional[dict] = None,
+    pool_options: Optional[dict[str, Any]] = None,
 ) -> Database:
     return Database(
         database_url,
@@ -128,7 +130,9 @@ def build_database(
     )
 
 
-def _retry(attempts: int, delay_s: float, fn, *args, **kwargs) -> tuple[bool, str]:
+def _retry(
+    attempts: int, delay_s: float, fn: Callable[..., object], *args, **kwargs
+) -> tuple[bool, str]:
     """Run ``fn`` up to ``attempts`` times; return (ok, description)."""
     last_error = "unknown error"
     for _ in range(max(1, attempts)):
@@ -157,7 +161,7 @@ class DatabaseConnector:
         return ok, error
 
 
-def get_db(request):
+def get_db(request: Request) -> Generator[Session, None, None]:
     """FastAPI dependency: one short-lived session per request, always closed."""
     database: Database = request.app.state.database
     session = database.session()
