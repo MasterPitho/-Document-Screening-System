@@ -1,8 +1,29 @@
+# --- Web framework -----------------------------------------------------------
 fastapi==0.141.1
 uvicorn==0.52.4
 python-multipart==0.0.32
-opencv-python-headless==4.14.0.94
-pillow==12.3.0
-pytesseract==0.3.13
-numpy==2.5.2
 pydantic==2.13.5
+
+# --- Imaging / CV ------------------------------------------------------------
+# insightface requires OpenCV with GUI support (opencv-python); the headless
+# wheel is a direct conflict, so we use opencv-python in every environment.
+opencv-python==5.0.0.93
+pillow==12.3.0
+numpy==2.5.2
+scikit-image==0.26.0
+scipy==1.18.1
+requests==2.34.2
+tqdm==4.70.0
+
+# --- OCR ---------------------------------------------------------------------
+pytesseract==0.3.13
+
+# --- Database ----------------------------------------------------------------
+sqlalchemy==2.0.42
+alembic==1.19.2
+psycopg[binary]==3.3.5
+
+# --- Face recognition (InsightFace / ArcFace) ----------------------------------
+insightface==1.0.1
+onnx==1.22.0
+onnxruntime==1.29.0
