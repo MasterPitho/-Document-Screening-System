@@ -105,6 +105,64 @@ def test_api_rejects_unsupported_type():
 
 
 @pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_health_endpoint():
+    client = TestClient(main.app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_api_rejects_corrupt_and_oversized_images():
+    client = TestClient(main.app)
+    corrupt = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", b"not-an-image", "image/jpeg")},
+    )
+    oversized = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", b"0" * (main.MAX_IMAGE_BYTES + 1), "image/jpeg")},
+    )
+    assert corrupt.status_code == 400
+    assert oversized.status_code == 413
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_skipped_face_verification_requires_review(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "extract_and_verify_faces",
+        lambda document, live: {
+            "status": "SKIPPED_NO_LIVE_PHOTO",
+            "match_status": "SKIPPED_NO_LIVE_PHOTO",
+            "face_detected_in_document": True,
+            "face_detected_in_live": None,
+            "similarity_score": None,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "extract_mrz_from_image",
+        lambda document: {
+            "detected": True,
+            "source": "ocr",
+            "status": "VALID",
+            "confidence": 1.0,
+            "data": main.parse_td3_mrz(VALID_LINE1, VALID_LINE2),
+        },
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", jpeg_bytes(), "image/jpeg")},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["risk_assessment"]["decision"] == "SECONDARY_INSPECTION_REQUIRED"
+    assert any(factor["factor"] == "UNKNOWN_MODULE" for factor in body["risk_assessment"]["factors"])
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
 def test_api_returns_screened_schema():
     client = TestClient(main.app)
     response = client.post(

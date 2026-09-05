@@ -38,6 +38,7 @@ RISK_WEIGHTS = {
     "EXPIRED_DOCUMENT": int(os.getenv("RISK_EXPIRED", "25")),
     "MRZ_NOT_DETECTED": int(os.getenv("RISK_MRZ_NOT_DETECTED", "20")),
     "FACE_NOT_DETECTED": int(os.getenv("RISK_FACE_NOT_DETECTED", "20")),
+    "UNKNOWN_MODULE": int(os.getenv("RISK_UNKNOWN_MODULE", "15")),
 }
 
 app = FastAPI(
@@ -226,7 +227,7 @@ def _valid_date(value: str) -> bool:
 
 
 def _normalize_mrz_line(line: str, line_number: int) -> str:
-    value = "".join(char for char in line.upper() if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<")
+    value = "".join(char for char in line.upper() if not char.isspace())
     if line_number != 2 or len(value) != 44:
         return value
 
@@ -675,8 +676,7 @@ async def screen_document(
     elif face_status in {"NO_FACE_IN_DOCUMENT", "NO_FACE_IN_LIVE_PHOTO", "MULTIPLE_FACES", "INVALID_IMAGE", "LOW_CONFIDENCE", "ERROR"}:
         add_factor("FACE_NOT_DETECTED", f"Face verification state: {face_status}.")
     elif face_status == "SKIPPED_NO_LIVE_PHOTO":
-        risk_factors.append({"factor": "FACE_VERIFICATION_SKIPPED", "weight": 0,
-                             "detail": "No live photo was supplied; no match was claimed."})
+        add_factor("UNKNOWN_MODULE", "No live photo was supplied; face verification was skipped.")
 
     mrz_data = mrz_result.get("data")
     checks = mrz_data.get("checks") if isinstance(mrz_data, dict) else None

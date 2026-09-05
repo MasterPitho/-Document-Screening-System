@@ -135,6 +135,7 @@ Configuration is environment-driven:
 - `TAMPERING_THRESHOLD`: default `60`.
 - `RISK_MEDIUM_THRESHOLD`: default `35`.
 - `RISK_HIGH_THRESHOLD`: default `65`.
+- `RISK_UNKNOWN_MODULE`: default `15`; applied when face verification is skipped because no live photo was supplied.
 
 Risk weights are intentionally heuristic prototype values. They should be calibrated against labeled data before operational use.
 
