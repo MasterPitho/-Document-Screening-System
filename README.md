@@ -127,17 +127,20 @@ An MRZ checksum means the MRZ data is internally consistent. It does not prove t
 
 Configuration is environment-driven:
 
-- `ALLOWED_ORIGINS`: comma-separated frontend origins. Default: `http://localhost:3000,http://localhost:5173`.
-- `MAX_FILE_SIZE_MB`: default `10`.
+- `CORS_ORIGINS`: comma-separated frontend origins. `ALLOWED_ORIGINS` remains supported as a legacy alias. Default: `http://localhost:3000,http://localhost:5173`.
+- `MAX_IMAGE_BYTES`: default `10485760`; `MAX_FILE_SIZE_MB` remains supported as a legacy size alias.
 - `MAX_IMAGE_PIXELS`: default `40000000`.
+- `MAX_IMAGE_WIDTH`: default `10000`.
+- `MAX_IMAGE_HEIGHT`: default `10000`.
 - `MRZ_CONFIDENCE_THRESHOLD`: default `0.70`.
-- `FACE_SIMILARITY_THRESHOLD`: default `0.60`.
+- `FACE_MATCH_THRESHOLD`: default `0.60`; `FACE_SIMILARITY_THRESHOLD` remains supported as a legacy alias.
 - `TAMPERING_THRESHOLD`: default `60`.
-- `RISK_MEDIUM_THRESHOLD`: default `35`.
-- `RISK_HIGH_THRESHOLD`: default `65`.
+- `RISK_REVIEW_THRESHOLD`: default `35`; `RISK_MEDIUM_THRESHOLD` remains supported as a legacy alias.
+- `RISK_REJECT_THRESHOLD`: default `65`; `RISK_HIGH_THRESHOLD` remains supported as a legacy alias.
 - `RISK_UNKNOWN_MODULE`: default `15`; applied when face verification is skipped because no live photo was supplied.
 
 Risk weights are intentionally heuristic prototype values. They should be calibrated against labeled data before operational use.
+Each module also reports `module_state`: `PASS`, `FAIL`, `NOT_AVAILABLE`, or `ERROR`. Unavailable and error states cannot produce an automatic clearance.
 
 ## Testing
 

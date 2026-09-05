@@ -25,13 +25,18 @@ logger = logging.getLogger("document_screening")
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
-MAX_IMAGE_BYTES = int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024)))
 MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
+MAX_IMAGE_WIDTH = int(os.getenv("MAX_IMAGE_WIDTH", "10000"))
+MAX_IMAGE_HEIGHT = int(os.getenv("MAX_IMAGE_HEIGHT", "10000"))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MRZ_CONFIDENCE_THRESHOLD = float(os.getenv("MRZ_CONFIDENCE_THRESHOLD", "0.70"))
-FACE_SIMILARITY_THRESHOLD = float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.60"))
+FACE_SIMILARITY_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", os.getenv("FACE_SIMILARITY_THRESHOLD", "0.60")))
 TAMPERING_THRESHOLD = float(os.getenv("TAMPERING_THRESHOLD", "60"))
-RISK_THRESHOLDS = (int(os.getenv("RISK_MEDIUM_THRESHOLD", "35")), int(os.getenv("RISK_HIGH_THRESHOLD", "65")))
+RISK_THRESHOLDS = (
+    int(os.getenv("RISK_REVIEW_THRESHOLD", os.getenv("RISK_MEDIUM_THRESHOLD", "35"))),
+    int(os.getenv("RISK_REJECT_THRESHOLD", os.getenv("RISK_HIGH_THRESHOLD", "65"))),
+)
 RISK_WEIGHTS = {
     "TAMPERING_SUSPECTED": int(os.getenv("RISK_TAMPERING", "40")),
     "FACE_MISMATCH": int(os.getenv("RISK_FACE_MISMATCH", "35")),
@@ -51,7 +56,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in os.getenv(
-        "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"
+        "CORS_ORIGINS", os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
     ).split(",") if origin.strip()],
     allow_credentials=False,
     allow_methods=["*"],
@@ -62,6 +67,7 @@ app.add_middleware(
 class FaceVerificationResult(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
+    module_state: str = "NOT_AVAILABLE"
     face_detected_in_document: bool
     face_detected_in_live: Optional[bool] = None
     face_bounding_box: Optional[dict[str, int]] = None
@@ -74,6 +80,7 @@ class MRZValidationResult(BaseModel):
     detected: bool
     source: str
     status: str = "NOT_DETECTED"
+    module_state: str = "NOT_AVAILABLE"
     confidence: float = 0.0
     line1: Optional[str] = None
     line2: Optional[str] = None
@@ -84,6 +91,7 @@ class MRZValidationResult(BaseModel):
 class TamperingResult(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
+    module_state: str = "NOT_AVAILABLE"
     ela_mean_intensity: float
     ela_std_dev: float
     edge_artifact_score: float
@@ -102,6 +110,7 @@ class RiskAssessment(BaseModel):
     decision: str
     factors: list[dict[str, Any]]
     reasons: list[str]
+    module_statuses: dict[str, str]
     explanation: str
 
 
@@ -144,6 +153,8 @@ def _validate_image_bytes(image_bytes: bytes, content_type: Optional[str], label
             expected_formats = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
             if actual_format != expected_formats[content_type]:
                 raise HTTPException(status_code=415, detail=f"{label} content does not match its declared type.")
+            if image.width > MAX_IMAGE_WIDTH or image.height > MAX_IMAGE_HEIGHT:
+                raise HTTPException(status_code=413, detail=f"{label} width and height exceed safe limits.")
             if image.width * image.height > MAX_IMAGE_PIXELS:
                 raise HTTPException(status_code=413, detail=f"{label} dimensions are too large.")
             image.verify()
@@ -184,6 +195,36 @@ def _face_error(error: Exception) -> dict[str, Any]:
         "similarity_score": None,
         "error": "Face verification was unavailable.",
     }
+
+
+def _mrz_module_state(result: dict[str, object]) -> str:
+    if result.get("status") == "OCR_FAILED":
+        return "ERROR"
+    if result.get("detected") and result.get("status") == "VALID":
+        return "PASS"
+    if result.get("detected"):
+        return "FAIL"
+    return "NOT_AVAILABLE"
+
+
+def _face_module_state(result: dict[str, object]) -> str:
+    status = result.get("status")
+    if status == "ERROR":
+        return "ERROR"
+    if status == "MATCH":
+        return "PASS"
+    if status == "MISMATCH":
+        return "FAIL"
+    return "NOT_AVAILABLE"
+
+
+def _tampering_module_state(result: dict[str, object]) -> str:
+    status = result.get("status")
+    if status == "ANALYSIS_ERROR":
+        return "ERROR"
+    if status == "SUSPECTED":
+        return "FAIL"
+    return "PASS"
 
 # -------------------------------------------------------------
 # Module 1 & 2: ICAO Doc 9303 Checksum & Parser
@@ -376,6 +417,8 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
             "source": "ocr",
             "status": "OCR_FAILED",
             "confidence": 0.0,
+            "candidate_count": 0,
+            "ocr_attempts": 9,
             "reason": f"MRZ OCR unavailable: {error}",
         }
 
@@ -386,6 +429,8 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
             "source": "ocr",
             "status": "NOT_DETECTED",
             "confidence": 0.0,
+            "candidate_count": 0,
+            "ocr_attempts": 9,
             "reason": "Unable to extract two exact-length TD3 MRZ lines.",
         }
 
@@ -397,17 +442,29 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
                 scored_pairs.append((score, first, second, parsed))
     if not scored_pairs:
         return {"detected": False, "source": "ocr", "status": "NOT_DETECTED", "confidence": 0.0,
-                "reason": "Unable to form a TD3 MRZ candidate pair."}
+            "candidate_count": len(unique_candidates), "ocr_attempts": 9,
+            "reason": "Unable to form a TD3 MRZ candidate pair."}
 
     score, line1, line2, parsed = max(scored_pairs, key=lambda item: item[0])
     if score < MRZ_CONFIDENCE_THRESHOLD:
         return {"detected": False, "source": "ocr", "status": "OCR_LOW_CONFIDENCE",
-                "confidence": round(score, 3), "reason": "Unable to extract a structurally valid TD3 MRZ."}
+                "confidence": round(score, 3), "candidate_count": len(unique_candidates),
+                "ocr_attempts": 9, "selected_score": round(score, 3),
+                "reason": "Unable to extract a structurally valid TD3 MRZ."}
+    checks = parsed.get("checks", {})
     return {
         "detected": True,
         "source": "ocr",
         "status": parsed.get("status", "INVALID"),
         "confidence": round(score, 3),
+        "candidate_count": len(unique_candidates),
+        "ocr_attempts": 9,
+        "selected_score": round(score, 3),
+        "validation": {
+            "structure_valid": parsed.get("status") != "MALFORMED",
+            "checksums_valid": all(checks.values()) if isinstance(checks, dict) else False,
+            "dates_valid": bool(isinstance(checks, dict) and checks.get("dob_valid") and checks.get("expiry_valid")),
+        },
         "line1": line1,
         "line2": line2,
         "data": parsed,
@@ -656,6 +713,10 @@ async def screen_document(
     else:
         mrz_result = extract_mrz_from_image(doc_bytes)
 
+    tamper_result["module_state"] = _tampering_module_state(tamper_result)
+    face_result["module_state"] = _face_module_state(face_result)
+    mrz_result["module_state"] = _mrz_module_state(mrz_result)
+
     # 4. Explainable prototype risk score. These weights are heuristic, not probabilities.
     risk_score = 0
     risk_factors: list[dict[str, Any]] = []
@@ -710,6 +771,11 @@ async def screen_document(
 
     processing_time_ms = int((time.perf_counter() - started_at) * 1000)
     reasons = [factor["detail"] for factor in risk_factors]
+    module_statuses = {
+        "mrz": str(mrz_result["module_state"]),
+        "face": str(face_result["module_state"]),
+        "tampering": str(tamper_result["module_state"]),
+    }
     logger.info("screen_request_completed request_id=%s status=%s risk_score=%s processing_time_ms=%s",
                 request_id, risk_level, risk_score, processing_time_ms)
 
@@ -723,6 +789,7 @@ async def screen_document(
             "decision": decision,
             "factors": risk_factors,
             "reasons": reasons,
+            "module_statuses": module_statuses,
             "explanation": "Heuristic screening signals require human review; they do not prove authenticity or forgery.",
         },
         "modules": {

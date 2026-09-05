@@ -123,8 +123,15 @@ def test_api_rejects_corrupt_and_oversized_images():
         "/api/v1/screen",
         files={"document_image": ("document.jpg", b"0" * (main.MAX_IMAGE_BYTES + 1), "image/jpeg")},
     )
+    wide_buffer = io.BytesIO()
+    Image.new("RGB", (main.MAX_IMAGE_WIDTH + 1, 1), "white").save(wide_buffer, format="JPEG")
+    too_wide = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", wide_buffer.getvalue(), "image/jpeg")},
+    )
     assert corrupt.status_code == 400
     assert oversized.status_code == 413
+    assert too_wide.status_code == 413
 
 
 @pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
@@ -175,6 +182,7 @@ def test_api_returns_screened_schema():
     assert len(body["request_id"]) == 32
     assert body["risk_assessment"]["decision"] == "SECONDARY_INSPECTION_REQUIRED"
     assert any(factor["factor"] == "MRZ_NOT_DETECTED" for factor in body["risk_assessment"]["factors"])
+    assert body["risk_assessment"]["module_statuses"]["mrz"] in {"NOT_AVAILABLE", "ERROR"}
     assert body["face_verification"]["similarity_score"] is None or isinstance(
         body["face_verification"]["similarity_score"], float
     )
