@@ -7,17 +7,37 @@ AI-Based Fake Identity & Document Screening System
 
 import io
 import datetime
+import logging
+import os
+import time
 from typing import Any, Optional
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 import cv2
 import pytesseract  # type: ignore[import-untyped]
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ConfigDict
 
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
+logger = logging.getLogger("document_screening")
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
+MAX_IMAGE_BYTES = int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MRZ_CONFIDENCE_THRESHOLD = float(os.getenv("MRZ_CONFIDENCE_THRESHOLD", "0.70"))
+FACE_SIMILARITY_THRESHOLD = float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.60"))
+TAMPERING_THRESHOLD = float(os.getenv("TAMPERING_THRESHOLD", "60"))
+RISK_THRESHOLDS = (int(os.getenv("RISK_MEDIUM_THRESHOLD", "35")), int(os.getenv("RISK_HIGH_THRESHOLD", "65")))
+RISK_WEIGHTS = {
+    "TAMPERING_SUSPECTED": int(os.getenv("RISK_TAMPERING", "40")),
+    "FACE_MISMATCH": int(os.getenv("RISK_FACE_MISMATCH", "35")),
+    "MRZ_CHECKSUM_FAILURE": int(os.getenv("RISK_MRZ_CHECKSUM", "20")),
+    "EXPIRED_DOCUMENT": int(os.getenv("RISK_EXPIRED", "25")),
+    "MRZ_NOT_DETECTED": int(os.getenv("RISK_MRZ_NOT_DETECTED", "20")),
+    "FACE_NOT_DETECTED": int(os.getenv("RISK_FACE_NOT_DETECTED", "20")),
+}
 
 app = FastAPI(
     title="AI Document Screening Engine",
@@ -27,7 +47,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[origin.strip() for origin in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"
+    ).split(",") if origin.strip()],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,6 +57,8 @@ app.add_middleware(
 
 
 class FaceVerificationResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    status: str
     face_detected_in_document: bool
     face_detected_in_live: Optional[bool] = None
     face_bounding_box: Optional[dict[str, int]] = None
@@ -43,8 +67,11 @@ class FaceVerificationResult(BaseModel):
 
 
 class MRZValidationResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
     detected: bool
     source: str
+    status: str = "NOT_DETECTED"
+    confidence: float = 0.0
     line1: Optional[str] = None
     line2: Optional[str] = None
     data: Optional[dict[str, Any]] = None
@@ -52,19 +79,24 @@ class MRZValidationResult(BaseModel):
 
 
 class TamperingResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    status: str
     ela_mean_intensity: float
     ela_std_dev: float
     edge_artifact_score: float
     metadata_present: bool
     confidence: float = Field(ge=0.0, le=100.0)
     is_tampered: bool
+    signals: list[str] = Field(default_factory=list)
 
 
 class RiskAssessment(BaseModel):
     score: int = Field(ge=0, le=100)
     status: str
+    level: str
     decision: str
-    factors: list[str]
+    factors: list[dict[str, Any]]
+    explanation: str
 
 
 class ScreeningModules(BaseModel):
@@ -74,9 +106,49 @@ class ScreeningModules(BaseModel):
 
 
 class ScreenResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     status: str
     risk_assessment: RiskAssessment
     modules: ScreeningModules
+    processing_time_ms: int
+    document: dict[str, str]
+    mrz: MRZValidationResult
+    tampering_analysis: TamperingResult
+    face_verification: FaceVerificationResult
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled screening error on %s", request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Document screening failed unexpectedly."})
+
+
+def _validate_image_bytes(image_bytes: bytes, content_type: Optional[str], label: str) -> Image.Image:
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail=f"{label} must be JPG, PNG, or WebP.")
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail=f"{label} is empty.")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail=f"{label} must be {MAX_IMAGE_BYTES // (1024 * 1024)} MB or smaller.")
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            actual_format = image.format
+            expected_formats = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
+            if actual_format != expected_formats[content_type]:
+                raise HTTPException(status_code=415, detail=f"{label} content does not match its declared type.")
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise HTTPException(status_code=413, detail=f"{label} dimensions are too large.")
+            image.verify()
+        with Image.open(io.BytesIO(image_bytes)) as decoded:
+            decoded.load()
+            return decoded.copy()
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise HTTPException(status_code=413, detail=f"{label} dimensions are unsafe.") from error
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=f"{label} is invalid or unreadable.") from error
 
 # -------------------------------------------------------------
 # Module 1 & 2: ICAO Doc 9303 Checksum & Parser
@@ -102,15 +174,61 @@ def verify_mrz_field(data: str, check_digit: str) -> bool:
         return False
     return calculate_icao_checksum(data) == int(check_digit)
 
+def _valid_mrz_chars(value: str) -> bool:
+    return all(char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<" for char in value)
+
+
+def _valid_date(value: str) -> bool:
+    if len(value) != 6 or not value.isdigit():
+        return False
+    try:
+        datetime.date(1900 + int(value[:2]), int(value[2:4]), int(value[4:6]))
+        return True
+    except ValueError:
+        try:
+            datetime.date(2000 + int(value[:2]), int(value[2:4]), int(value[4:6]))
+            return True
+        except ValueError:
+            return False
+
+
+def _normalize_mrz_line(line: str, line_number: int) -> str:
+    value = "".join(char for char in line.upper() if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<")
+    if line_number != 2 or len(value) != 44:
+        return value
+
+    numeric_positions = set(range(13, 20)) | set(range(21, 28)) | {9, 43}
+    replacements = {"O": "0", "Q": "0", "I": "1", "L": "1", "B": "8"}
+    return "".join(replacements.get(char, char) if index in numeric_positions else char
+                   for index, char in enumerate(value))
+
+
+def _mrz_structure_valid(line1: str, line2: str) -> bool:
+    return (
+        len(line1) == 44
+        and len(line2) == 44
+        and _valid_mrz_chars(line1)
+        and _valid_mrz_chars(line2)
+        and line1[0] in {"P", "V"}
+        and line1[2:5].isalpha()
+        and line2[10:13].isalpha()
+        and line2[13:19].isdigit()
+        and line2[21:27].isdigit()
+        and line2[20] in {"M", "F", "<"}
+        and _valid_date(line2[13:19])
+        and _valid_date(line2[21:27])
+    )
+
+
 def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
-    """
-    Standard TD3 Passport MRZ (2 lines of 44 characters).
-    """
-    line1 = line1.strip().upper()
-    line2 = line2.strip().upper()
-    
+    """Parse and validate two strict ICAO TD3 passport MRZ lines."""
+    line1 = _normalize_mrz_line(line1, 1)
+    line2 = _normalize_mrz_line(line2, 2)
+
     if len(line1) != 44 or len(line2) != 44:
-        return {"error": "Invalid TD3 MRZ length. Expected 44 chars per line."}
+        return {"status": "MALFORMED", "error": "TD3 MRZ lines must each contain exactly 44 characters."}
+    if not _mrz_structure_valid(line1, line2):
+        return {"status": "MALFORMED", "error": "MRZ contains invalid TD3 structure or characters."}
 
     doc_type = line1[0:2].replace('<', '')
     issuing_country = line1[2:5].replace('<', '')
@@ -135,7 +253,8 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
     composite_data = line2[0:10] + line2[13:20] + line2[21:28] + line2[28:43]
     valid_composite = verify_mrz_field(composite_data, _composite_chk)
 
-    # Expiry validation
+    birth_date_valid = _valid_date(dob_raw)
+    expiry_date_valid = _valid_date(expiry_raw)
     try:
         exp_year = int(expiry_raw[0:2])
         exp_month = int(expiry_raw[2:4])
@@ -143,10 +262,19 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
         full_year = 2000 + exp_year if exp_year < 70 else 1900 + exp_year
         exp_date = datetime.date(full_year, exp_month, exp_day)
         is_expired = exp_date < datetime.date.today()
-    except Exception:
-        is_expired = True
+    except ValueError:
+        is_expired = False
+
+    checks = {
+        "passport_number_valid": valid_passport,
+        "dob_valid": valid_dob and birth_date_valid,
+        "expiry_valid": valid_expiry and expiry_date_valid,
+        "composite_valid": valid_composite,
+    }
+    status = "VALID" if all(checks.values()) else "INVALID"
 
     return {
+        "status": status,
         "doc_type": doc_type,
         "issuing_country": issuing_country,
         "full_name": f"{given_names} {surname}".strip(),
@@ -156,12 +284,7 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
         "gender": gender,
         "expiry_date": expiry_raw,
         "is_expired": is_expired,
-        "checks": {
-            "passport_number_valid": valid_passport,
-            "dob_valid": valid_dob,
-            "expiry_valid": valid_expiry,
-            "composite_valid": valid_composite,
-        }
+        "checks": checks,
     }
 
 
@@ -170,48 +293,94 @@ def _clean_mrz_line(line: str) -> str:
     return "".join(char for char in line.upper() if char in allowed)
 
 
+def _ocr_candidates(ocr_text: str) -> list[str]:
+    candidates = []
+    for raw_line in ocr_text.splitlines():
+        candidate = _clean_mrz_line(raw_line)
+        if len(candidate) == 44:
+            candidates.append(candidate)
+    return candidates
+
+
+def _mrz_pair_score(line1: str, line2: str) -> tuple[float, dict[str, object]]:
+    parsed = parse_td3_mrz(line1, line2)
+    if parsed.get("status") == "MALFORMED":
+        return 0.0, parsed
+    checks = parsed.get("checks", {})
+    valid_checks = sum(bool(value) for value in checks.values()) if isinstance(checks, dict) else 0
+    score = 0.4 + valid_checks / 10.0
+    if parsed.get("status") == "VALID":
+        score += 0.2
+    return min(1.0, score), parsed
+
+
 def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
-    """Read the lower passport zone and return the best two 44-character lines."""
+    """Extract a structurally valid TD3 MRZ without inventing missing characters."""
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("L")
         width, height = image.size
         mrz_crop = image.crop((0, int(height * 0.55), width, height))
         mrz_crop = mrz_crop.resize((width * 2, max(1, mrz_crop.height * 2)))
-        mrz_crop = ImageEnhance.Contrast(mrz_crop).enhance(2.0)
-        ocr_text = pytesseract.image_to_string(
-            mrz_crop,
-            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
-        )
+        variants = [
+            ImageEnhance.Contrast(mrz_crop).enhance(2.0),
+            np.where(np.array(mrz_crop) > 150, 255, 0).astype(np.uint8),
+            cv2.adaptiveThreshold(np.array(mrz_crop), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY, 31, 11),
+        ]
+        candidates: list[str] = []
+        for variant in variants:
+            ocr_text = pytesseract.image_to_string(
+                variant,
+                config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
+            )
+            candidates.extend(_ocr_candidates(ocr_text))
     except Exception as error:
         return {
             "detected": False,
             "source": "ocr",
-            "error": f"MRZ OCR unavailable: {error}",
+            "status": "NOT_DETECTED",
+            "confidence": 0.0,
+            "reason": f"MRZ OCR unavailable: {error}",
         }
-    candidates = [_clean_mrz_line(line) for line in ocr_text.splitlines()]
-    candidates = [line for line in candidates if len(line) >= 40]
-    if len(candidates) < 2:
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    if len(unique_candidates) < 2:
         return {
             "detected": False,
             "source": "ocr",
-            "error": "Unable to detect two MRZ lines from the document image.",
+            "status": "NOT_DETECTED",
+            "confidence": 0.0,
+            "reason": "Unable to extract two exact-length TD3 MRZ lines.",
         }
 
-    line1 = min(candidates, key=lambda line: abs(len(line) - 44))[:44].ljust(44, "<")
-    remaining = [line for line in candidates if line != line1]
-    line2 = min(remaining, key=lambda line: abs(len(line) - 44))[:44].ljust(44, "<")
+    scored_pairs: list[tuple[float, str, str, dict[str, object]]] = []
+    for first_index, first in enumerate(unique_candidates):
+        for second_index, second in enumerate(unique_candidates):
+            if first_index != second_index:
+                score, parsed = _mrz_pair_score(first, second)
+                scored_pairs.append((score, first, second, parsed))
+    if not scored_pairs:
+        return {"detected": False, "source": "ocr", "status": "NOT_DETECTED", "confidence": 0.0,
+                "reason": "Unable to form a TD3 MRZ candidate pair."}
+
+    score, line1, line2, parsed = max(scored_pairs, key=lambda item: item[0])
+    if score < MRZ_CONFIDENCE_THRESHOLD:
+        return {"detected": False, "source": "ocr", "status": "NOT_DETECTED",
+                "confidence": round(score, 3), "reason": "Unable to extract a structurally valid TD3 MRZ."}
     return {
         "detected": True,
         "source": "ocr",
+        "status": parsed.get("status", "INVALID"),
+        "confidence": round(score, 3),
         "line1": line1,
         "line2": line2,
-        "data": parse_td3_mrz(line1, line2),
+        "data": parsed,
     }
 
 # -------------------------------------------------------------
 # Module 3: Tampering Detection (Error Level Analysis & Splice)
 # -------------------------------------------------------------
-def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, float | bool]:
+def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, Any]:
     source_image = Image.open(io.BytesIO(image_bytes))
     original = source_image.convert("RGB")
 
@@ -241,19 +410,26 @@ def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, fl
     edge_strength = float(np.mean(cv2.Laplacian(gray, cv2.CV_64F).var()))
     edge_artifact_score = min(100.0, edge_strength / 25.0)
     metadata_present = bool(source_image.info)
+    signals: list[str] = []
+    if mean_diff > 35.0 or std_diff > 45.0:
+        signals.append("ELA_ANOMALY")
+    if edge_artifact_score > 70.0:
+        signals.append("EDGE_INCONSISTENCY")
     confidence = min(
         100.0,
         round((mean_diff / 50.0) * 55.0 + (std_diff / 70.0) * 25.0 + edge_artifact_score * 0.2, 1),
     )
-    tamper_detected = confidence >= 60.0
+    tamper_detected = confidence >= TAMPERING_THRESHOLD and bool(signals)
 
     return {
+        "status": "SUSPECTED" if tamper_detected else "NO_SIGNIFICANT_ANOMALY",
         "ela_mean_intensity": round(mean_diff, 2),
         "ela_std_dev": round(std_diff, 2),
         "edge_artifact_score": round(edge_artifact_score, 2),
         "metadata_present": metadata_present,
         "is_tampered": tamper_detected,
         "confidence": confidence,
+        "signals": signals,
     }
 
 # -------------------------------------------------------------
@@ -282,8 +458,9 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     if doc_img is None:
         return {
             "face_detected_in_document": False,
-            "match_status": "INVALID_DOC_IMAGE",
-            "similarity_score": 0.0
+            "status": "INVALID_IMAGE",
+            "match_status": "INVALID_IMAGE",
+            "similarity_score": None
         }
 
     face_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'  # type: ignore[attr-defined]
@@ -291,8 +468,9 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     if hasattr(face_cascade, "empty") and face_cascade.empty():
         return {
             "face_detected_in_document": False,
+            "status": "INVALID_IMAGE",
             "match_status": "FACE_CASCADE_LOAD_FAILED",
-            "similarity_score": 0.0
+            "similarity_score": None
         }
 
     doc_gray: Any = cv2.cvtColor(doc_img, cv2.COLOR_BGR2GRAY)  # type: ignore[call-overload]
@@ -301,8 +479,17 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     if len(doc_faces) == 0:
         return {
             "face_detected_in_document": False,
-            "match_status": "NO_FACE_IN_DOC",
-            "similarity_score": 0.0
+            "status": "NO_FACE_IN_DOCUMENT",
+            "match_status": "NO_FACE_IN_DOCUMENT",
+            "similarity_score": None
+        }
+    if len(doc_faces) > 1:
+        return {
+            "face_detected_in_document": True,
+            "face_detected_in_live": None,
+            "status": "MULTIPLE_FACES",
+            "match_status": "MULTIPLE_FACES",
+            "similarity_score": None,
         }
 
     (x, y, w, h) = doc_faces[0]
@@ -312,6 +499,7 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         return {
             "face_detected_in_document": True,
             "face_bounding_box": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
+            "status": "SKIPPED_NO_LIVE_PHOTO",
             "match_status": "SKIPPED_NO_LIVE_PHOTO",
             "similarity_score": None
         }
@@ -323,8 +511,9 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         return {
             "face_detected_in_document": True,
             "face_detected_in_live": False,
-            "match_status": "INVALID_LIVE_IMAGE",
-            "similarity_score": 0.0
+            "status": "INVALID_IMAGE",
+            "match_status": "INVALID_IMAGE",
+            "similarity_score": None
         }
 
     live_gray: Any = cv2.cvtColor(live_img, cv2.COLOR_BGR2GRAY)  # type: ignore[call-overload]
@@ -334,8 +523,17 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
         return {
             "face_detected_in_document": True,
             "face_detected_in_live": False,
-            "match_status": "NO_FACE_IN_LIVE_STREAM",
-            "similarity_score": 0.0
+            "status": "NO_FACE_IN_LIVE_PHOTO",
+            "match_status": "NO_FACE_IN_LIVE_PHOTO",
+            "similarity_score": None
+        }
+    if len(live_faces) > 1:
+        return {
+            "face_detected_in_document": True,
+            "face_detected_in_live": True,
+            "status": "MULTIPLE_FACES",
+            "match_status": "MULTIPLE_FACES",
+            "similarity_score": None,
         }
 
     (lx, ly, lw, lh) = live_faces[0]
@@ -345,12 +543,13 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     live_embedding = _face_embedding(live_face_crop)
     sim_score = max(0.0, min(1.0, _cosine_similarity(doc_embedding, live_embedding)))
 
-    matched = sim_score >= 0.60
+    matched = sim_score >= FACE_SIMILARITY_THRESHOLD
     return {
         "face_detected_in_document": True,
         "face_detected_in_live": True,
         "similarity_score": round(sim_score, 3),
-        "match_status": "MATCH" if matched else "MISMATCH_ALERT"
+        "status": "MATCH" if matched else "MISMATCH",
+        "match_status": "MATCH" if matched else "MISMATCH",
     }
 
 # -------------------------------------------------------------
@@ -363,37 +562,13 @@ async def screen_document(
     mrz_line1: Optional[str] = Form(None),
     mrz_line2: Optional[str] = Form(None)
 ) -> dict[str, object]:
-    if document_image.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=415, detail="Document must be JPG, PNG, or WebP.")
-    if live_photo and live_photo.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=415, detail="Live photo must be JPG, PNG, or WebP.")
-
+    started_at = time.perf_counter()
+    logger.info("screen_request_received")
     doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
     live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1) if live_photo else None
-
-    if not doc_bytes:
-        raise HTTPException(status_code=400, detail="Document image is empty.")
-    if len(doc_bytes) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Document image must be 10 MB or smaller.")
-    if live_bytes and len(live_bytes) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Live photo must be 10 MB or smaller.")
-
-    try:
-        Image.open(io.BytesIO(doc_bytes)).verify()
-    except Exception as error:
-        raise HTTPException(
-            status_code=400,
-            detail="Document image is invalid or unreadable. Upload a JPG, PNG, or JPEG file.",
-        ) from error
-
-    if live_bytes:
-        try:
-            Image.open(io.BytesIO(live_bytes)).verify()
-        except Exception as error:
-            raise HTTPException(
-                status_code=400,
-                detail="Live photo is invalid or unreadable. Upload a JPG, PNG, or JPEG file.",
-            ) from error
+    _validate_image_bytes(doc_bytes, document_image.content_type, "Document image")
+    if live_photo and live_bytes is not None:
+        _validate_image_bytes(live_bytes, live_photo.content_type, "Live photo")
 
     # 1. Tampering detection
     tamper_result = analyze_tampering_ela(doc_bytes)
@@ -408,6 +583,8 @@ async def screen_document(
         mrz_result = {
             "detected": "error" not in mrz_data,
             "source": "form",
+            "status": str(mrz_data.get("status", "MALFORMED")),
+            "confidence": 1.0 if mrz_data.get("status") == "VALID" else 0.5,
             "line1": mrz_line1,
             "line2": mrz_line2,
             "data": mrz_data,
@@ -415,54 +592,81 @@ async def screen_document(
     else:
         mrz_result = extract_mrz_from_image(doc_bytes)
 
-    # 4. Composite Risk Score (0 - 100)
+    # 4. Explainable prototype risk score. These weights are heuristic, not probabilities.
     risk_score = 0
-    risk_factors: list[str] = []
+    risk_factors: list[dict[str, Any]] = []
+
+    def add_factor(name: str, detail: str) -> None:
+        nonlocal risk_score
+        weight = RISK_WEIGHTS[name]
+        risk_score += weight
+        risk_factors.append({"factor": name, "weight": weight, "detail": detail})
 
     if tamper_result["is_tampered"]:
-        risk_score += 40
-        risk_factors.append("Digital manipulation / splice detected via ELA")
+        add_factor("TAMPERING_SUSPECTED", "Multiple image-forensics signals exceeded prototype thresholds.")
 
-    if face_result.get("match_status") == "MISMATCH_ALERT":
-        risk_score += 35
-        risk_factors.append("Live individual does not match document photo")
+    face_status = face_result.get("status")
+    if face_status == "MISMATCH":
+        add_factor("FACE_MISMATCH", "The document and live face prototype vectors did not meet the threshold.")
+    elif face_status in {"NO_FACE_IN_DOCUMENT", "NO_FACE_IN_LIVE_PHOTO", "MULTIPLE_FACES", "INVALID_IMAGE"}:
+        add_factor("FACE_NOT_DETECTED", f"Face verification state: {face_status}.")
+    elif face_status == "SKIPPED_NO_LIVE_PHOTO":
+        risk_factors.append({"factor": "FACE_VERIFICATION_SKIPPED", "weight": 0,
+                             "detail": "No live photo was supplied; no match was claimed."})
 
     mrz_data = mrz_result.get("data")
     checks = mrz_data.get("checks") if isinstance(mrz_data, dict) else None
     if isinstance(checks, dict):
         for check, valid in checks.items():
             if not valid:
-                risk_score += 20
-                risk_factors.append(f"Checksum failure: {check}")
+                add_factor("MRZ_CHECKSUM_FAILURE", f"MRZ validation failed: {check}.")
     if isinstance(mrz_data, dict) and mrz_data.get("is_expired"):
-        risk_score += 25
-        risk_factors.append("Travel document is expired")
+        add_factor("EXPIRED_DOCUMENT", "The parsed document expiry date is before today.")
+    if not mrz_result.get("detected"):
+        add_factor("MRZ_NOT_DETECTED", "No structurally valid TD3 MRZ was detected.")
 
     risk_score = min(100, risk_score)
+    if risk_score >= RISK_THRESHOLDS[1]:
+        risk_level = "HIGH_RISK"
+    elif risk_score >= RISK_THRESHOLDS[0]:
+        risk_level = "MEDIUM_RISK"
+    else:
+        risk_level = "LOW_RISK"
 
-    if risk_score >= 65:
-        decision = "DENIED_FLAGGED_FORGERY"
+    if risk_score >= RISK_THRESHOLDS[1]:
+        decision = "HIGH_RISK_REVIEW_REQUIRED"
         status_color = "RED"
-    elif risk_score >= 35:
+    elif risk_factors:
         decision = "SECONDARY_INSPECTION_REQUIRED"
         status_color = "YELLOW"
     else:
         decision = "CLEARED"
         status_color = "GREEN"
 
+    processing_time_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info("screen_request_completed status=%s risk_score=%s processing_time_ms=%s",
+                risk_level, risk_score, processing_time_ms)
+
     response: dict[str, object] = {
-        "status": "Completed",
+        "status": "SCREENED",
         "risk_assessment": {
             "score": risk_score,
             "status": status_color,
+            "level": risk_level,
             "decision": decision,
-            "factors": risk_factors
+            "factors": risk_factors,
+            "explanation": "Heuristic screening signals require human review; they do not prove authenticity or forgery.",
         },
         "modules": {
             "tampering_analysis": tamper_result,
             "face_verification": face_result,
             "mrz_validation": mrz_result
-        }
+        },
+        "processing_time_ms": processing_time_ms,
+        "document": {"format": "TD3" if mrz_result.get("detected") else "UNKNOWN", "type": "PASSPORT" if mrz_result.get("detected") else "UNKNOWN"},
+        "mrz": mrz_result,
+        "tampering_analysis": tamper_result,
+        "face_verification": face_result,
     }
     return response
 
