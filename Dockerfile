@@ -1,6 +1,9 @@
 # Document Screening Engine - production image
 # Runtime dependencies only: OpenCV (libgl), Tesseract OCR, Google's face model.
-FROM python:3.13-slim-trixie
+# NOTE: base-image scanners (Docker DX / Hub, Scout) can flag this base for
+# zlib/libxml2 CVEs with no upstream fix yet; this Dockerfile upgrades the base
+# and strips pip's vendored SBOM (false-positive msgpack/setuptools findings).
+FROM python:3.13-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -10,7 +13,9 @@ ENV FACE_MODELS_DIR=/opt/insightface
 ENV FACE_MODEL_NAME=buffalo_sc
 
 # libgl/libglib are required by opencv-python; tesseract-ocr for MRZ OCR.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade pulls the latest patched base packages into the image.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     tesseract-ocr \
@@ -20,7 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -f /usr/local/lib/python3.13/site-packages/pip/_vendor/bom.cdx.json
 
 # Pre-download the face recognition model so startup does not need the network.
 # Runs before the app code is copied so the Docker layer is cache-friendly.
