@@ -398,3 +398,91 @@ def test_exe_extension_is_rejected():
         files={"document_image": ("document.exe", jpeg_bytes(), "image/jpeg")},
     )
     assert response.status_code == 415
+
+
+@skip_client
+def test_excessive_pixel_count_rejected(monkeypatch):
+    monkeypatch.setattr(main, "MAX_IMAGE_PIXELS", 100_000)
+    big = io.BytesIO()
+    Image.new("RGB", (400, 400), "white").save(big, format="JPEG")  # 160_000 px
+    with pytest.raises(HTTPException) as excinfo:
+        main._validate_image_bytes(big.getvalue(), "image/jpeg", "Doc")
+    assert excinfo.value.status_code == 413
+
+
+@skip_client
+def test_invalid_live_photo_returns_controlled_error():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={
+            "document_image": ("document.jpg", jpeg_bytes(), "image/jpeg"),
+            "live_photo": ("live.jpg", b"corrupt-garbage", "image/jpeg"),
+        },
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "BAD_REQUEST"
+
+
+@skip_client
+def test_face_not_detected_risk_factor(monkeypatch):
+    face = {
+        "face_detected_in_document": False,
+        "face_detected_in_live": None,
+        "status": "NO_FACE_IN_DOCUMENT",
+        "match_status": "NO_FACE_IN_DOCUMENT",
+        "similarity_score": None,
+        "module_state": "NOT_AVAILABLE",
+    }
+    response = _screen_with(monkeypatch, _valid_mrz_result(), face, _pass_tamper())
+    assert response.status_code == 200
+    body = response.json()
+    assert any(f["factor"] == "FACE_NOT_DETECTED" for f in body["risk_assessment"]["factors"])
+    assert body["risk_assessment"]["decision"] != "CLEARED"
+
+
+# ---------------------------------------------------------------------------
+# Face similarity: NaN / division-by-zero protection
+# ---------------------------------------------------------------------------
+
+def test_cosine_similarity_zero_vectors_is_zero_not_nan():
+    result = main._cosine_similarity(np.zeros(16), np.zeros(16))
+    assert result == 0.0
+    assert not np.isnan(result)
+
+
+def test_cosine_similarity_identical_vectors_is_one():
+    vector = np.array([1.0, 0.0, 0.0])
+    assert main._cosine_similarity(vector, vector) == 1.0
+
+
+def test_cosine_similarity_orthogonal_vectors_is_zero():
+    first = np.array([1.0, 0.0])
+    second = np.array([0.0, 1.0])
+    assert main._cosine_similarity(first, second) == 0.0
+
+
+@skip_client
+def test_face_zero_embedding_is_controlled(monkeypatch):
+    # A degenerate (all-zero) embedding must never produce NaN or a crash;
+    # it should resolve deterministically to a non-clear decision.
+    monkeypatch.setattr(main, "extract_mrz_from_image", lambda doc: _valid_mrz_result())
+    monkeypatch.setattr(main, "analyze_tampering_ela", lambda doc, **kw: _pass_tamper())
+    monkeypatch.setattr(main, "_face_embedding", lambda crop: np.zeros(16))
+    _monkeypatch_cascade(monkeypatch, [np.array([(10, 20, 100, 120)]), np.array([(50, 60, 90, 110)])])
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={
+            "document_image": ("document.jpg", jpeg_bytes(), "image/jpeg"),
+            "live_photo": ("live.jpg", jpeg_bytes(), "image/jpeg"),
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    similarity = body["face_verification"]["similarity_score"]
+    assert similarity is None or (0.0 <= similarity <= 1.0)
+    assert not (similarity is not None and isinstance(similarity, float) and np.isnan(similarity))
+    assert body["risk_assessment"]["decision"] != "CLEARED"

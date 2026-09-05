@@ -161,7 +161,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The suite (65 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, tamper statuses including INCONCLUSIVE handling and the missing-weight regression, structured error bodies, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, decompression-bomb protection), fail-safe and high-risk decision gates, deterministic face bounding-box reporting, and safe handling of unexpected internal errors.
+The suite (72 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, tamper statuses including INCONCLUSIVE handling and the missing-weight regression, structured error bodies, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, pixel-count and decompression-bomb protection), fail-safe and high-risk decision gates, deterministic face bounding-box reporting, face NaN/division-by-zero protection, and safe handling of unexpected internal errors.
 
 ## Security and Privacy
 
