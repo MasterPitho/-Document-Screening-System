@@ -94,6 +94,22 @@ def test_tampering_result_is_multi_signal():
     assert 0 <= result["confidence"] <= 100
 
 
+def test_configuration_validation_rejects_invalid_thresholds():
+    original_face_threshold = main.FACE_SIMILARITY_THRESHOLD
+    original_risk_thresholds = main.RISK_THRESHOLDS
+    try:
+        main.FACE_SIMILARITY_THRESHOLD = 1.1
+        with pytest.raises(ValueError, match="FACE_MATCH_THRESHOLD"):
+            main._validate_configuration()
+        main.FACE_SIMILARITY_THRESHOLD = original_face_threshold
+        main.RISK_THRESHOLDS = (70, 35)
+        with pytest.raises(ValueError, match="Risk thresholds"):
+            main._validate_configuration()
+    finally:
+        main.FACE_SIMILARITY_THRESHOLD = original_face_threshold
+        main.RISK_THRESHOLDS = original_risk_thresholds
+
+
 @pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
 def test_api_rejects_unsupported_type():
     client = TestClient(main.app)

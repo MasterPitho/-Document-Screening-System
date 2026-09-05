@@ -47,6 +47,27 @@ RISK_WEIGHTS = {
     "UNKNOWN_MODULE": int(os.getenv("RISK_UNKNOWN_MODULE", "15")),
 }
 
+
+def _validate_configuration() -> None:
+    if MAX_IMAGE_BYTES <= 0:
+        raise ValueError("MAX_IMAGE_BYTES must be greater than zero")
+    if MAX_IMAGE_PIXELS <= 0 or MAX_IMAGE_WIDTH <= 0 or MAX_IMAGE_HEIGHT <= 0:
+        raise ValueError("Image pixel and dimension limits must be greater than zero")
+    if not 0.0 <= MRZ_CONFIDENCE_THRESHOLD <= 1.0:
+        raise ValueError("MRZ_CONFIDENCE_THRESHOLD must be between 0 and 1")
+    if not 0.0 <= FACE_SIMILARITY_THRESHOLD <= 1.0:
+        raise ValueError("FACE_MATCH_THRESHOLD must be between 0 and 1")
+    if not 0.0 <= TAMPERING_THRESHOLD <= 100.0:
+        raise ValueError("TAMPERING_THRESHOLD must be between 0 and 100")
+    review_threshold, reject_threshold = RISK_THRESHOLDS
+    if not 0 <= review_threshold < reject_threshold <= 100:
+        raise ValueError("Risk thresholds must satisfy 0 <= review < reject <= 100")
+    if any(weight < 0 for weight in RISK_WEIGHTS.values()):
+        raise ValueError("Risk weights cannot be negative")
+
+
+_validate_configuration()
+
 app = FastAPI(
     title="AI Document Screening Engine",
     description="Border checkpoint document screening for fake passport, tampering, and face verification",
