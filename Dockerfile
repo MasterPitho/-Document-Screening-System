@@ -1,4 +1,4 @@
-# AI Document Screening Backend Dockerfile
+# Document Screening Engine - production image (runtime dependencies only)
 FROM python:3.13-slim-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive

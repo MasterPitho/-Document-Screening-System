@@ -1,6 +1,15 @@
 """
-AI-Based Fake Identity & Document Screening System
+Document Screening & Verification Engine
 
+A Smart India Hackathon prototype that combines:
+  - ICAO 9303 TD3 passport MRZ checksum/date validation (rule-based)
+  - optional Tesseract OCR for MRZ extraction (rule-based candidate scoring)
+  - image-forensics signals (ELA / edge / metadata), which are heuristic
+  - a prototype face-detection + similarity indicator (Haar + vector cosine)
+  - an explainable heuristic risk score
+
+Nothing here is a legally definitive identity decision. A trained human
+officer remains the final decision maker.
 """
 
 # pyright: reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
@@ -11,41 +20,122 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Optional
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 import cv2
 import pytesseract  # type: ignore[import-untyped]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-logger = logging.getLogger("document_screening")
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, log_level, logging.INFO))
 
-MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(int(os.getenv("MAX_FILE_SIZE_MB", "10")) * 1024 * 1024)))
-MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "40000000"))
-MAX_IMAGE_WIDTH = int(os.getenv("MAX_IMAGE_WIDTH", "10000"))
-MAX_IMAGE_HEIGHT = int(os.getenv("MAX_IMAGE_HEIGHT", "10000"))
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MRZ_CONFIDENCE_THRESHOLD = float(os.getenv("MRZ_CONFIDENCE_THRESHOLD", "0.70"))
-FACE_SIMILARITY_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", os.getenv("FACE_SIMILARITY_THRESHOLD", "0.60")))
-TAMPERING_THRESHOLD = float(os.getenv("TAMPERING_THRESHOLD", "60"))
-RISK_THRESHOLDS = (
-    int(os.getenv("RISK_REVIEW_THRESHOLD", os.getenv("RISK_MEDIUM_THRESHOLD", "35"))),
-    int(os.getenv("RISK_REJECT_THRESHOLD", os.getenv("RISK_HIGH_THRESHOLD", "65"))),
-)
-RISK_WEIGHTS = {
-    "TAMPERING_SUSPECTED": int(os.getenv("RISK_TAMPERING", "40")),
-    "FACE_MISMATCH": int(os.getenv("RISK_FACE_MISMATCH", "35")),
-    "MRZ_CHECKSUM_FAILURE": int(os.getenv("RISK_MRZ_CHECKSUM", "20")),
-    "EXPIRED_DOCUMENT": int(os.getenv("RISK_EXPIRED", "25")),
-    "MRZ_NOT_DETECTED": int(os.getenv("RISK_MRZ_NOT_DETECTED", "20")),
-    "FACE_NOT_DETECTED": int(os.getenv("RISK_FACE_NOT_DETECTED", "20")),
-    "UNKNOWN_MODULE": int(os.getenv("RISK_UNKNOWN_MODULE", "15")),
-}
+@dataclass
+class Settings:
+    """Environment-driven configuration for the screening service.
+
+    All deploy-specific knobs are read from environment variables so no
+    code changes are needed to tune the service. Env variable names stay
+    backward compatible with earlier versions of this prototype.
+    """
+
+    cors_origins: list[str]
+    api_env: str
+    log_level: str
+    max_image_bytes: int
+    max_image_pixels: int
+    max_image_width: int
+    max_image_height: int
+    allowed_image_types: set[str]
+    allowed_image_extensions: set[str]
+    mrz_confidence_threshold: float
+    face_similarity_threshold: float
+    tampering_threshold: float
+    mrz_year_pivot: int
+    risk_review_threshold: int
+    risk_reject_threshold: int
+    risk_weights: dict[str, int]
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        def _int(name: str, default: int) -> int:
+            value = os.getenv(name)
+            if value is None or not value.strip():
+                return default
+            try:
+                return int(value)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+        def _float(name: str, default: float) -> float:
+            value = os.getenv(name)
+            if value is None or not value.strip():
+                return default
+            try:
+                return float(value)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be a number, got {value!r}") from exc
+
+        def _csv(name: str, legacy_name: str, default: str) -> list[str]:
+            raw = os.getenv(name, os.getenv(legacy_name, default))
+            return [item.strip() for item in raw.split(",") if item.strip()]
+
+        default_size_mb = _int("MAX_FILE_SIZE_MB", 10)
+        return cls(
+            cors_origins=_csv("CORS_ORIGINS", "ALLOWED_ORIGINS",
+                              "http://localhost:3000,http://localhost:5173"),
+            api_env=os.getenv("API_ENV", "development").strip() or "development",
+            log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            max_image_bytes=_int("MAX_IMAGE_BYTES", default_size_mb * 1024 * 1024),
+            max_image_pixels=_int("MAX_IMAGE_PIXELS", 40_000_000),
+            max_image_width=_int("MAX_IMAGE_WIDTH", 10_000),
+            max_image_height=_int("MAX_IMAGE_HEIGHT", 10_000),
+            allowed_image_types={t.strip() for t in
+                                 os.getenv("ALLOWED_IMAGE_TYPES", "image/jpeg,image/png,image/webp").split(",")
+                                 if t.strip()},
+            allowed_image_extensions={e.strip().lower() for e in
+                                      os.getenv("ALLOWED_IMAGE_EXTENSIONS", "jpg,jpeg,png,webp").split(",")
+                                      if e.strip()},
+            mrz_confidence_threshold=_float("MRZ_CONFIDENCE_THRESHOLD", 0.70),
+            face_similarity_threshold=_float("FACE_MATCH_THRESHOLD",
+                                             _float("FACE_SIMILARITY_THRESHOLD", 0.60)),
+            tampering_threshold=_float("TAMPERING_THRESHOLD", 60.0),
+            mrz_year_pivot=_int("MRZ_YEAR_PIVOT", 70),
+            risk_review_threshold=_int("RISK_REVIEW_THRESHOLD", _int("RISK_MEDIUM_THRESHOLD", 35)),
+            risk_reject_threshold=_int("RISK_REJECT_THRESHOLD", _int("RISK_HIGH_THRESHOLD", 65)),
+            risk_weights={
+                "TAMPERING_SUSPECTED": _int("RISK_TAMPERING", 40),
+                "TAMPERING_INCONCLUSIVE": _int("RISK_TAMPERING_INCONCLUSIVE", 15),
+                "FACE_MISMATCH": _int("RISK_FACE_MISMATCH", 35),
+                "MRZ_CHECKSUM_FAILURE": _int("RISK_MRZ_CHECKSUM", 20),
+                "EXPIRED_DOCUMENT": _int("RISK_EXPIRED", 25),
+                "MRZ_NOT_DETECTED": _int("RISK_MRZ_NOT_DETECTED", 20),
+                "FACE_NOT_DETECTED": _int("RISK_FACE_NOT_DETECTED", 20),
+                "UNKNOWN_MODULE": _int("RISK_UNKNOWN_MODULE", 15),
+            },
+        )
+
+
+settings = Settings.from_env()
+
+logger = logging.getLogger("document_screening")
+logging.basicConfig(level=getattr(logging, settings.log_level, logging.INFO))
+
+MAX_IMAGE_BYTES = settings.max_image_bytes
+MAX_IMAGE_PIXELS = settings.max_image_pixels
+MAX_IMAGE_WIDTH = settings.max_image_width
+MAX_IMAGE_HEIGHT = settings.max_image_height
+ALLOWED_IMAGE_TYPES = settings.allowed_image_types
+ALLOWED_IMAGE_EXTENSIONS = settings.allowed_image_extensions
+MRZ_CONFIDENCE_THRESHOLD = settings.mrz_confidence_threshold
+FACE_SIMILARITY_THRESHOLD = settings.face_similarity_threshold
+TAMPERING_THRESHOLD = settings.tampering_threshold
+MRZ_YEAR_PIVOT = settings.mrz_year_pivot
+RISK_THRESHOLDS = (settings.risk_review_threshold, settings.risk_reject_threshold)
+RISK_WEIGHTS = settings.risk_weights
 
 
 def _validate_configuration() -> None:
@@ -53,32 +143,43 @@ def _validate_configuration() -> None:
         raise ValueError("MAX_IMAGE_BYTES must be greater than zero")
     if MAX_IMAGE_PIXELS <= 0 or MAX_IMAGE_WIDTH <= 0 or MAX_IMAGE_HEIGHT <= 0:
         raise ValueError("Image pixel and dimension limits must be greater than zero")
+    if not ALLOWED_IMAGE_TYPES:
+        raise ValueError("ALLOWED_IMAGE_TYPES cannot be empty")
+    if not ALLOWED_IMAGE_EXTENSIONS:
+        raise ValueError("ALLOWED_IMAGE_EXTENSIONS cannot be empty")
     if not 0.0 <= MRZ_CONFIDENCE_THRESHOLD <= 1.0:
         raise ValueError("MRZ_CONFIDENCE_THRESHOLD must be between 0 and 1")
     if not 0.0 <= FACE_SIMILARITY_THRESHOLD <= 1.0:
         raise ValueError("FACE_MATCH_THRESHOLD must be between 0 and 1")
     if not 0.0 <= TAMPERING_THRESHOLD <= 100.0:
         raise ValueError("TAMPERING_THRESHOLD must be between 0 and 100")
+    if MRZ_YEAR_PIVOT < 0 or MRZ_YEAR_PIVOT > 100:
+        raise ValueError("MRZ_YEAR_PIVOT must be between 0 and 100")
     review_threshold, reject_threshold = RISK_THRESHOLDS
     if not 0 <= review_threshold < reject_threshold <= 100:
         raise ValueError("Risk thresholds must satisfy 0 <= review < reject <= 100")
     if any(weight < 0 for weight in RISK_WEIGHTS.values()):
         raise ValueError("Risk weights cannot be negative")
+    if any(name not in RISK_WEIGHTS for name in (
+        "TAMPERING_SUSPECTED", "TAMPERING_INCONCLUSIVE", "FACE_MISMATCH",
+        "MRZ_CHECKSUM_FAILURE", "EXPIRED_DOCUMENT", "MRZ_NOT_DETECTED",
+        "FACE_NOT_DETECTED", "UNKNOWN_MODULE",
+    )):
+        raise ValueError("Risk weight mapping is missing required factors")
 
 
 _validate_configuration()
 
 app = FastAPI(
-    title="AI Document Screening Engine",
-    description="Border checkpoint document screening for fake passport, tampering, and face verification",
-    version="1.0.0"
+    title="Document Screening Engine",
+    description="Border checkpoint document screening: TD3 MRZ checksum/date validation, "
+                "image-forensic signals, prototype face verification, and a heuristic risk score.",
+    version="1.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.getenv(
-        "CORS_ORIGINS", os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
-    ).split(",") if origin.strip()],
+    allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -154,34 +255,83 @@ class ScreenResponse(BaseModel):
     face_verification: FaceVerificationResult
 
 
+# Structured, consistent error responses. Client-facing bodies never include
+# stack traces, filesystem paths, or raw exception text.
+_ERROR_CODES_BY_STATUS = {
+    400: "BAD_REQUEST",
+    404: "NOT_FOUND",
+    413: "FILE_TOO_LARGE",
+    415: "UNSUPPORTED_MEDIA_TYPE",
+    422: "VALIDATION_ERROR",
+    500: "INTERNAL_ERROR",
+}
+
+
+def _error_code_for_status(status_code: int) -> str:
+    return _ERROR_CODES_BY_STATUS.get(status_code, "REQUEST_FAILED")
+
+
+def _structured_error(status_code: int, code: str, message: str, detail: object = None) -> JSONResponse:
+    error: dict[str, object] = {"code": code, "message": message}
+    if detail is not None:
+        error["detail"] = detail
+    return JSONResponse(status_code=status_code, content={"success": False, "error": error})
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    code = _error_code_for_status(exc.status_code)
+    logger.info("http_error path=%s status=%s code=%s", request.url.path, exc.status_code, code)
+    return _structured_error(exc.status_code, code, str(exc.detail), detail=str(exc.detail))
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    logger.info("validation_error path=%s errors=%s", request.url.path, exc.errors())
+    return _structured_error(422, "VALIDATION_ERROR", "Request validation failed.", detail=exc.errors())
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled screening error on %s", request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "Document screening failed unexpectedly."})
+    logger.exception("unhandled_screening_error path=%s type=%s", request.url.path, type(exc).__name__)
+    return _structured_error(500, "INTERNAL_ERROR", "Document screening failed unexpectedly.")
 
 
-def _validate_image_bytes(image_bytes: bytes, content_type: Optional[str], label: str) -> Image.Image:
-    if content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=415, detail=f"{label} must be JPG, PNG, or WebP.")
+def _validate_image_bytes(image_bytes: bytes, content_type: Optional[str], label: str,
+                          filename: Optional[str] = None) -> None:
+    """Validate an uploaded image without trusting the client.
+
+    Checks, in order: empty body, byte size, declared MIME type, file-name
+    extension, and finally the real image signature/dimensions via Pillow.
+    Raises HTTPException with an appropriate status code on failure.
+    """
     if not image_bytes:
         raise HTTPException(status_code=400, detail=f"{label} is empty.")
     if len(image_bytes) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail=f"{label} must be {MAX_IMAGE_BYTES // (1024 * 1024)} MB or smaller.")
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail=f"{label} must be JPG, PNG, or WebP.")
+    if filename:
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if extension not in ALLOWED_IMAGE_EXTENSIONS:
+            raise HTTPException(status_code=415, detail=f"{label} must be a JPG, PNG, or WebP file.")
 
     try:
         with Image.open(io.BytesIO(image_bytes)) as image:
             actual_format = image.format
+            if actual_format is None:
+                raise HTTPException(status_code=400, detail=f"{label} is invalid or unreadable.")
             expected_formats = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}
-            if actual_format != expected_formats[content_type]:
+            if actual_format != expected_formats.get(content_type, ""):
                 raise HTTPException(status_code=415, detail=f"{label} content does not match its declared type.")
             if image.width > MAX_IMAGE_WIDTH or image.height > MAX_IMAGE_HEIGHT:
                 raise HTTPException(status_code=413, detail=f"{label} width and height exceed safe limits.")
             if image.width * image.height > MAX_IMAGE_PIXELS:
                 raise HTTPException(status_code=413, detail=f"{label} dimensions are too large.")
             image.verify()
+        # Re-open and fully decode to confirm the file is not a truncated image.
         with Image.open(io.BytesIO(image_bytes)) as decoded:
             decoded.load()
-            return decoded.copy()
     except HTTPException:
         raise
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
@@ -202,6 +352,7 @@ def _tampering_error(error: Exception) -> dict[str, Any]:
         "tampering_score": 0.0,
         "is_tampered": False,
         "signals": ["ANALYSIS_ERROR"],
+        "indicators": ["Image-forensic analysis could not be completed"],
         "explanation": "Tampering analysis was unavailable; secondary inspection is required.",
     }
 
@@ -223,7 +374,7 @@ def _mrz_module_state(result: dict[str, object]) -> str:
         return "ERROR"
     if result.get("detected") and result.get("status") == "VALID":
         return "PASS"
-    if result.get("detected"):
+    if result.get("status") in {"INVALID", "MALFORMED"}:
         return "FAIL"
     return "NOT_AVAILABLE"
 
@@ -243,8 +394,10 @@ def _tampering_module_state(result: dict[str, object]) -> str:
     status = result.get("status")
     if status == "ANALYSIS_ERROR":
         return "ERROR"
-    if status == "SUSPECTED":
+    if status == "SUSPICIOUS":
         return "FAIL"
+    if status == "INCONCLUSIVE":
+        return "NOT_AVAILABLE"
     return "PASS"
 
 
@@ -284,18 +437,29 @@ def _valid_mrz_chars(value: str) -> bool:
     return all(char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<" for char in value)
 
 
+def _mrz_year_full(two_digit_year: int, pivot: Optional[int] = None) -> int:
+    """Decode a two-digit MRZ year using the ICAO-style pivot rule.
+
+    Years below the pivot are 2000-2099, years at/above the pivot are
+    1900-1999. This keeps validity interpretation consistent with the
+    expiry/nonexpired logic used elsewhere in the parser.
+    """
+    pivot_value = MRZ_YEAR_PIVOT if pivot is None else pivot
+    return 2000 + two_digit_year if two_digit_year < pivot_value else 1900 + two_digit_year
+
+
 def _valid_date(value: str) -> bool:
     if len(value) != 6 or not value.isdigit():
         return False
     try:
-        datetime.date(1900 + int(value[:2]), int(value[2:4]), int(value[4:6]))
+        datetime.date(
+            _mrz_year_full(int(value[:2])),
+            int(value[2:4]),
+            int(value[4:6]),
+        )
         return True
     except ValueError:
-        try:
-            datetime.date(2000 + int(value[:2]), int(value[2:4]), int(value[4:6]))
-            return True
-        except ValueError:
-            return False
+        return False
 
 
 def _normalize_mrz_line(line: str, line_number: int) -> str:
@@ -362,11 +526,11 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
     birth_date_valid = _valid_date(dob_raw)
     expiry_date_valid = _valid_date(expiry_raw)
     try:
-        exp_year = int(expiry_raw[0:2])
-        exp_month = int(expiry_raw[2:4])
-        exp_day = int(expiry_raw[4:6])
-        full_year = 2000 + exp_year if exp_year < 70 else 1900 + exp_year
-        exp_date = datetime.date(full_year, exp_month, exp_day)
+        exp_date = datetime.date(
+            _mrz_year_full(int(expiry_raw[0:2])),
+            int(expiry_raw[2:4]),
+            int(expiry_raw[4:6]),
+        )
         is_expired = exp_date < datetime.date.today()
     except ValueError:
         is_expired = False
@@ -427,12 +591,16 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
         width, height = image.size
         mrz_crop = image.crop((0, int(height * 0.55), width, height))
         mrz_crop = mrz_crop.resize((width * 2, max(1, mrz_crop.height * 2)))
-        variants = [
-            ImageEnhance.Contrast(mrz_crop).enhance(2.0),
-            np.where(np.array(mrz_crop) > 150, 255, 0).astype(np.uint8),
-            cv2.adaptiveThreshold(np.array(mrz_crop), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, 31, 11),
-        ]
+        try:
+            variants = [
+                ImageEnhance.Contrast(mrz_crop).enhance(2.0),
+                np.where(np.array(mrz_crop) > 150, 255, 0).astype(np.uint8),
+                cv2.adaptiveThreshold(np.array(mrz_crop), 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                      cv2.THRESH_BINARY, 31, 11),
+            ]
+        finally:
+            image.close()
+            mrz_crop.close()
         candidates: list[str] = []
         for variant in variants:
             for page_mode in (6, 7, 11):
@@ -442,6 +610,7 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
                 )
                 candidates.extend(_ocr_candidates(ocr_text))
     except Exception as error:
+        logger.warning("mrz_ocr_unavailable type=%s reason=%s", type(error).__name__, error)
         return {
             "detected": False,
             "source": "ocr",
@@ -449,7 +618,7 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
             "confidence": 0.0,
             "candidate_count": 0,
             "ocr_attempts": 9,
-            "reason": f"MRZ OCR unavailable: {error}",
+            "reason": "MRZ OCR unavailable; secondary inspection is recommended.",
         }
 
     unique_candidates = list(dict.fromkeys(candidates))
@@ -534,61 +703,87 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
 # Module 3: Tampering Detection (Error Level Analysis & Splice)
 # -------------------------------------------------------------
 def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, Any]:
-    source_image = Image.open(io.BytesIO(image_bytes))
-    original = source_image.convert("RGB")
+    """Heuristic image-forensics analysis (ELA + edge + metadata signals).
 
-    # Recompress to JPEG at standard quality
-    buffer = io.BytesIO()
-    original.save(buffer, 'JPEG', quality=quality)
-    buffer.seek(0)
-    resaved = Image.open(buffer)
+    This is NOT a forgery classifier. It returns explainable indicators and a
+    status of CLEAN, SUSPICIOUS, or INCONCLUSIVE. Suspicious/inconclusive
+    results require human secondary inspection.
+    """
+    with Image.open(io.BytesIO(image_bytes)) as source_image:
+        original = source_image.convert("RGB")
+        metadata_present = bool(source_image.info)
+    try:
+        # Recompress to JPEG at a standard quality and measure local error.
+        buffer = io.BytesIO()
+        original.save(buffer, "JPEG", quality=quality)
+        buffer.seek(0)
+        with Image.open(buffer) as resaved:
+            resaved.load()
+            diff = ImageChops.difference(original, resaved)
 
-    # Calculate difference
-    diff: Any = ImageChops.difference(original, resaved)
-    extrema = diff.getextrema()
-    extrema_values: list[int] = []
-    if extrema:
-        extrema_values = [int(value) for item in extrema for value in item]
-    max_diff = max(extrema_values) if extrema_values else 1
-    if max_diff == 0:
-        max_diff = 1
-    scale = 255.0 / max_diff
-    diff = ImageEnhance.Brightness(diff).enhance(scale)
+        extrema = diff.getextrema()
+        extrema_values: list[int] = []
+        if extrema:
+            extrema_values = [int(value) for item in extrema for value in item]
+        max_diff = max(extrema_values) if extrema_values else 1
+        if max_diff == 0:
+            max_diff = 1
+        scaled = ImageEnhance.Brightness(diff).enhance(255.0 / max_diff)
+        diff_arr = np.array(scaled)
+        scaled.close()
+        diff.close()
+        mean_diff = float(np.mean(diff_arr))
+        std_diff = float(np.std(diff_arr))
 
-    diff_arr = np.array(diff)
-    mean_diff = float(np.mean(diff_arr))
-    std_diff = float(np.std(diff_arr))
+        gray = np.array(original.convert("L"))
+        edge_strength = float(np.mean(cv2.Laplacian(gray, cv2.CV_64F).var()))
+        edge_artifact_score = min(100.0, edge_strength / 25.0)
+    finally:
+        original.close()
 
-    gray = np.array(original.convert("L"))
-    edge_strength = float(np.mean(cv2.Laplacian(gray, cv2.CV_64F).var()))
-    edge_artifact_score = min(100.0, edge_strength / 25.0)
-    metadata_present = bool(source_image.info)
     signals: list[str] = []
+    indicators: list[str] = []
     if mean_diff > 35.0 or std_diff > 45.0:
         signals.append("ELA_ANOMALY")
+        indicators.append("Inconsistent JPEG compression artifacts")
     if edge_artifact_score > 70.0:
         signals.append("EDGE_INCONSISTENCY")
+        indicators.append("Localized edge inconsistency")
+
     confidence = min(
         100.0,
         round((mean_diff / 50.0) * 55.0 + (std_diff / 70.0) * 25.0 + edge_artifact_score * 0.2, 1),
     )
-    tamper_detected = confidence >= TAMPERING_THRESHOLD and bool(signals)
+    if confidence >= TAMPERING_THRESHOLD and signals:
+        status = "SUSPICIOUS"
+        is_tampered = True
+    elif signals:
+        status = "INCONCLUSIVE"
+        is_tampered = False
+    else:
+        status = "CLEAN"
+        is_tampered = False
+
+    explanation = (
+        "Possible image-manipulation signals detected; secondary inspection is recommended."
+        if status == "SUSPICIOUS"
+        else ("Image-forensic signals are mixed or weak; the result is inconclusive."
+              if status == "INCONCLUSIVE"
+              else "No image-forensic anomalies crossed the configured prototype thresholds.")
+    )
 
     return {
-        "status": "SUSPECTED" if tamper_detected else "NO_SIGNIFICANT_ANOMALY",
+        "status": status,
         "ela_mean_intensity": round(mean_diff, 2),
         "ela_std_dev": round(std_diff, 2),
         "edge_artifact_score": round(edge_artifact_score, 2),
         "metadata_present": metadata_present,
-        "is_tampered": tamper_detected,
         "confidence": confidence,
         "tampering_score": confidence,
+        "is_tampered": is_tampered,
         "signals": signals,
-        "explanation": (
-            "Potential image manipulation signals detected; secondary inspection is recommended."
-            if tamper_detected
-            else "No significant anomaly crossed the configured prototype thresholds."
-        ),
+        "indicators": indicators,
+        "explanation": explanation,
     }
 
 # -------------------------------------------------------------
@@ -721,6 +916,7 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     return {
         "face_detected_in_document": True,
         "face_detected_in_live": True,
+        "face_bounding_box": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
         "similarity_score": round(sim_score, 3),
         "status": "MATCH" if matched else "MISMATCH",
         "match_status": "MATCH" if matched else "MISMATCH",
@@ -744,19 +940,27 @@ async def screen_document(
             status_code=400,
             detail="mrz_line1 and mrz_line2 must be provided together (both or neither).",
         )
-    doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
-    live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1) if live_photo else None
-    _validate_image_bytes(doc_bytes, document_image.content_type, "Document image")
-    if live_photo and live_bytes is not None:
-        _validate_image_bytes(live_bytes, live_photo.content_type, "Live photo")
+    try:
+        doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
+        _validate_image_bytes(doc_bytes, document_image.content_type, "Document image",
+                              document_image.filename)
+        live_bytes: Optional[bytes] = None
+        if live_photo:
+            live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1)
+            _validate_image_bytes(live_bytes, live_photo.content_type, "Live photo",
+                                  live_photo.filename)
+    finally:
+        await document_image.close()
+        if live_photo:
+            await live_photo.close()
 
-    # 1. Tampering detection
+    # 1. Tampering detection (heuristic image-forensic signals)
     try:
         tamper_result = analyze_tampering_ela(doc_bytes)
     except Exception as error:
         tamper_result = _tampering_error(error)
 
-    # 2. Face verification
+    # 2. Face verification (prototype; never a definitive identity decision)
     try:
         face_result = extract_and_verify_faces(doc_bytes, live_bytes)
     except Exception as error:
@@ -792,10 +996,12 @@ async def screen_document(
         risk_score += weight
         risk_factors.append({"factor": name, "weight": weight, "detail": detail})
 
-    if tamper_result["is_tampered"]:
-        add_factor("TAMPERING_SUSPECTED", "Multiple image-forensics signals exceeded prototype thresholds.")
+    if tamper_result.get("is_tampered"):
+        add_factor("TAMPERING_SUSPECTED", "Image-forensic signals indicated possible manipulation.")
     elif tamper_result.get("status") == "ANALYSIS_ERROR":
         add_factor("TAMPERING_SUSPECTED", "Tampering analysis failed and requires secondary inspection.")
+    elif tamper_result.get("status") == "INCONCLUSIVE":
+        add_factor("TAMPERING_INCONCLUSIVE", "Tampering analysis was inconclusive; secondary inspection is recommended.")
 
     face_status = face_result.get("status")
     if face_status == "MISMATCH":
@@ -846,8 +1052,11 @@ async def screen_document(
 
     processing_time_ms = int((time.perf_counter() - started_at) * 1000)
     reasons = [factor["detail"] for factor in risk_factors]
-    logger.info("screen_request_completed request_id=%s status=%s risk_score=%s processing_time_ms=%s",
-                request_id, risk_level, risk_score, processing_time_ms)
+    logger.info(
+        "screen_request_completed request_id=%s risk_level=%s risk_score=%s processing_time_ms=%s "
+        "module_states=%s factor_count=%s",
+        request_id, risk_level, risk_score, processing_time_ms, module_statuses, len(risk_factors),
+    )
 
     response: dict[str, object] = {
         "status": "SCREENED",
@@ -860,7 +1069,11 @@ async def screen_document(
             "factors": risk_factors,
             "reasons": reasons,
             "module_statuses": module_statuses,
-            "explanation": "Heuristic screening signals require human review; they do not prove authenticity or forgery.",
+            "explanation": (
+                "Heuristic screening signals require human review; they do not prove authenticity or forgery. "
+                f"Score = sum of configured weights for activated MRZ/face/tampering factors, bounded 0-100 "
+                f"(review threshold {RISK_THRESHOLDS[0]}, reject threshold {RISK_THRESHOLDS[1]})."
+            ),
         },
         "modules": {
             "tampering_analysis": tamper_result,
@@ -877,4 +1090,5 @@ async def screen_document(
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "AI Document Screening Engine"}
+    # No sensitive information is exposed here.
+    return {"status": "ok", "service": "Document Screening Engine", "env": settings.api_env}

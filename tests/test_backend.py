@@ -73,7 +73,9 @@ def test_ocr_failure_is_safe(monkeypatch):
     result = main.extract_mrz_from_image(jpeg_bytes())
     assert result["detected"] is False
     assert result["status"] == "OCR_FAILED"
-    assert "tesseract unavailable" in result["reason"]
+    # The client-facing reason must not leak internal exception text.
+    assert "tesseract unavailable" not in result["reason"]
+    assert result["reason"]
 
 
 def test_ocr_low_confidence_is_not_valid(monkeypatch):
@@ -90,8 +92,9 @@ def test_ocr_low_confidence_is_not_valid(monkeypatch):
 
 def test_tampering_result_is_multi_signal():
     result = main.analyze_tampering_ela(jpeg_bytes())
-    assert result["status"] in {"SUSPECTED", "NO_SIGNIFICANT_ANOMALY"}
+    assert result["status"] in {"CLEAN", "SUSPICIOUS", "INCONCLUSIVE"}
     assert isinstance(result["signals"], list)
+    assert isinstance(result["indicators"], list)
     assert 0 <= result["confidence"] <= 100
 
 
@@ -338,7 +341,7 @@ def _pass_face():
 
 def _pass_tamper():
     return {
-        "status": "NO_SIGNIFICANT_ANOMALY",
+        "status": "CLEAN",
         "module_state": "PASS",
         "is_tampered": False,
         "ela_mean_intensity": 10.0,
@@ -348,6 +351,7 @@ def _pass_tamper():
         "confidence": 10.0,
         "tampering_score": 10.0,
         "signals": [],
+        "indicators": [],
         "explanation": "No anomaly.",
     }
 
@@ -410,10 +414,11 @@ def test_face_mismatch_is_not_cleared(monkeypatch):
 def test_tampering_suspected_is_not_cleared(monkeypatch):
     tamper_result = dict(_pass_tamper())
     tamper_result.update({
-        "status": "SUSPECTED",
+        "status": "SUSPICIOUS",
         "module_state": "FAIL",
         "is_tampered": True,
         "signals": ["ELA_ANOMALY"],
+        "indicators": ["Inconsistent JPEG compression artifacts"],
     })
     response = _screen_with_modules(
         monkeypatch,
@@ -424,6 +429,28 @@ def test_tampering_suspected_is_not_cleared(monkeypatch):
     body = response.json()
     assert body["risk_assessment"]["decision"] != "CLEARED"
     assert any(factor["factor"] == "TAMPERING_SUSPECTED" for factor in body["risk_assessment"]["factors"])
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_tampering_inconclusive_is_not_cleared(monkeypatch):
+    tamper_result = dict(_pass_tamper())
+    tamper_result.update({
+        "status": "INCONCLUSIVE",
+        "module_state": "NOT_AVAILABLE",
+        "is_tampered": False,
+        "signals": ["EDGE_INCONSISTENCY"],
+        "indicators": ["Localized edge inconsistency"],
+    })
+    response = _screen_with_modules(
+        monkeypatch,
+        mrz_result=_valid_mrz_result(),
+        face_result=_pass_face(),
+        tamper_result=tamper_result,
+    )
+    body = response.json()
+    assert body["risk_assessment"]["decision"] != "CLEARED"
+    assert any(factor["factor"] == "TAMPERING_INCONCLUSIVE" for factor in body["risk_assessment"]["factors"])
+    assert body["risk_assessment"]["module_statuses"]["tampering"] == "NOT_AVAILABLE"
 
 
 @pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
@@ -506,10 +533,11 @@ def test_multiple_module_failures_is_not_cleared(monkeypatch):
     }
     tamper_result = dict(_pass_tamper())
     tamper_result.update({
-        "status": "SUSPECTED",
+        "status": "SUSPICIOUS",
         "module_state": "FAIL",
         "is_tampered": True,
         "signals": ["ELA_ANOMALY"],
+        "indicators": ["Inconsistent JPEG compression artifacts"],
     })
     response = _screen_with_modules(
         monkeypatch,
@@ -556,3 +584,158 @@ def test_neither_manual_mrz_line_falls_back_to_ocr(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["mrz"]["source"] == "ocr"
+
+
+# ---------------------------------------------------------------------------
+# Hardened upload validation & structured error responses
+# ---------------------------------------------------------------------------
+
+def _png_bytes():
+    buffer = io.BytesIO()
+    Image.new("RGB", (100, 100), "white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_api_rejects_empty_file():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", b"", "image/jpeg")},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "BAD_REQUEST"
+    assert "message" in body["error"]
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_api_rejects_untrusted_extension():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.exe", jpeg_bytes(), "image/png")},
+    )
+    assert response.status_code == 415
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_api_rejects_declared_type_mismatch():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", _png_bytes(), "image/jpeg")},
+    )
+    assert response.status_code == 415
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_missing_document_field_returns_422():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        data={"mrz_line1": VALID_LINE1, "mrz_line2": VALID_LINE2},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+    assert isinstance(body["error"]["detail"], list)
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_file_too_large_returns_structured_error():
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("document.jpg", b"x" * (main.MAX_IMAGE_BYTES + 1), "image/jpeg")},
+    )
+    assert response.status_code == 413
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "FILE_TOO_LARGE"
+
+
+# ---------------------------------------------------------------------------
+# MRZ pivot-year semantics
+# ---------------------------------------------------------------------------
+
+def _line2_with_expiry(expiry):
+    line = list(VALID_LINE2)
+    line[21:27] = expiry
+    line[27] = str(main.calculate_icao_checksum(expiry))
+    composite = "".join(line[0:10]) + "".join(line[13:20]) + "".join(line[21:28]) + "".join(line[28:43])
+    line[43] = str(main.calculate_icao_checksum(composite))
+    return "".join(line)
+
+
+def test_mrz_year_pivot_decoding():
+    assert main._mrz_year_full(69) == 2069
+    assert main._mrz_year_full(70) == 1970
+    assert main._mrz_year_full(70, pivot=50) == 1970
+    assert main._mrz_year_full(49, pivot=50) == 2049
+
+
+def test_mrz_expiry_uses_pivot_year():
+    future = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("510101"))
+    assert future["status"] == "VALID"
+    assert future["is_expired"] is False
+    past = main.parse_td3_mrz(VALID_LINE1, _line2_with_expiry("710101"))
+    assert past["status"] == "VALID"
+    assert past["is_expired"] is True
+
+
+@pytest.mark.skipif(TestClient is None, reason="FastAPI test client dependency unavailable")
+def test_invalid_form_mrz_gets_fail_module_state(monkeypatch):
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/v1/screen",
+        data={"mrz_line1": VALID_LINE1, "mrz_line2": "X" + VALID_LINE2[1:]},
+        files={"document_image": ("document.jpg", jpeg_bytes(), "image/jpeg")},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mrz"]["detected"] is False
+    assert body["mrz"]["source"] == "form"
+    assert body["risk_assessment"]["module_statuses"]["mrz"] == "FAIL"
+    assert body["risk_assessment"]["decision"] != "CLEARED"
+
+
+# ---------------------------------------------------------------------------
+# Face verification: deterministic bounding-box reporting
+# ---------------------------------------------------------------------------
+
+class _FakeCascade:
+    def __init__(self, faces):
+        self._faces = list(faces)
+
+    def empty(self):
+        return False
+
+    def detectMultiScale(self, gray, scaleFactor=1.1, minNeighbors=4, minSize=(40, 40)):
+        return self._faces.pop(0)
+
+
+def test_face_match_reports_bounding_box(monkeypatch):
+    import numpy as np
+    detector = _FakeCascade([np.array([(10, 20, 100, 120)]), np.array([(50, 60, 90, 110)])])
+    monkeypatch.setattr(main.cv2, "CascadeClassifier", lambda *args, **kwargs: detector)
+    monkeypatch.setattr(main, "_face_embedding", lambda crop: np.array([1.0, 0.0]))
+    monkeypatch.setattr(main, "_cosine_similarity", lambda first, second: 0.9)
+    result = main.extract_and_verify_faces(jpeg_bytes(), jpeg_bytes())
+    assert result["status"] == "MATCH"
+    assert result["face_bounding_box"] == {"x": 10, "y": 20, "w": 100, "h": 120}
+    assert abs(result["similarity_score"] - 0.9) < 1e-6
+
+
+def test_face_skipped_no_live_reports_bounding_box(monkeypatch):
+    import numpy as np
+    detector = _FakeCascade([np.array([(10, 20, 100, 120)])])
+    monkeypatch.setattr(main.cv2, "CascadeClassifier", lambda *args, **kwargs: detector)
+    result = main.extract_and_verify_faces(jpeg_bytes())
+    assert result["status"] == "SKIPPED_NO_LIVE_PHOTO"
+    assert result["face_bounding_box"] == {"x": 10, "y": 20, "w": 100, "h": 120}
