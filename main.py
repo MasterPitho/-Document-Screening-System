@@ -247,6 +247,15 @@ def _tampering_module_state(result: dict[str, object]) -> str:
         return "FAIL"
     return "PASS"
 
+
+def _has_blocking_module_state(module_statuses: dict[str, str]) -> bool:
+    """True when a required screening module did not complete successfully.
+
+    CLEAR is only allowed if every required module reported PASS. A FAIL, ERROR,
+    or NOT_AVAILABLE state must force a non-clear decision.
+    """
+    return any(status != "PASS" for status in module_statuses.values())
+
 # -------------------------------------------------------------
 # Module 1 & 2: ICAO Doc 9303 Checksum & Parser
 # -------------------------------------------------------------
@@ -467,24 +476,54 @@ def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
             "reason": "Unable to form a TD3 MRZ candidate pair."}
 
     score, line1, line2, parsed = max(scored_pairs, key=lambda item: item[0])
+    checks = parsed.get("checks")
+    checks_valid = bool(isinstance(checks, dict) and all(checks.values()))
+    structurally_valid = parsed.get("status") not in {"MALFORMED", "INVALID"}
+    fully_valid = parsed.get("status") == "VALID" and checks_valid
+
+    # A candidate below the confidence threshold is not reliable enough to report.
     if score < MRZ_CONFIDENCE_THRESHOLD:
         return {"detected": False, "source": "ocr", "status": "OCR_LOW_CONFIDENCE",
                 "confidence": round(score, 3), "candidate_count": len(unique_candidates),
                 "ocr_attempts": 9, "selected_score": round(score, 3),
                 "reason": "Unable to extract a structurally valid TD3 MRZ."}
-    checks = parsed.get("checks", {})
+
+    # A structurally plausible candidate that fails TD3 checksum or date validation is
+    # never reported as a successful detection. It is only retained as diagnostic context.
+    # detected == true must mean a sufficiently reliable TD3 MRZ, not merely one that
+    # "looks like" an MRZ.
+    if not fully_valid:
+        return {
+            "detected": False,
+            "source": "ocr",
+            "status": "OCR_LOW_CONFIDENCE",
+            "confidence": round(score, 3),
+            "candidate_count": len(unique_candidates),
+            "ocr_attempts": 9,
+            "selected_score": round(score, 3),
+            "validation": {
+                "structure_valid": structurally_valid,
+                "checksums_valid": checks_valid,
+                "dates_valid": bool(isinstance(checks, dict) and checks.get("dob_valid") and checks.get("expiry_valid")),
+            },
+            "candidate_line1": line1,
+            "candidate_line2": line2,
+            "candidate_data": parsed,
+            "reason": "A structurally plausible candidate failed TD3 checksum or date validation.",
+        }
+
     return {
         "detected": True,
         "source": "ocr",
-        "status": parsed.get("status", "INVALID"),
+        "status": "VALID",
         "confidence": round(score, 3),
         "candidate_count": len(unique_candidates),
         "ocr_attempts": 9,
         "selected_score": round(score, 3),
         "validation": {
-            "structure_valid": parsed.get("status") != "MALFORMED",
-            "checksums_valid": all(checks.values()) if isinstance(checks, dict) else False,
-            "dates_valid": bool(isinstance(checks, dict) and checks.get("dob_valid") and checks.get("expiry_valid")),
+            "structure_valid": True,
+            "checksums_valid": True,
+            "dates_valid": True,
         },
         "line1": line1,
         "line2": line2,
@@ -700,6 +739,11 @@ async def screen_document(
     started_at = time.perf_counter()
     request_id = uuid.uuid4().hex
     logger.info("screen_request_received request_id=%s", request_id)
+    if bool(mrz_line1) != bool(mrz_line2):
+        raise HTTPException(
+            status_code=400,
+            detail="mrz_line1 and mrz_line2 must be provided together (both or neither).",
+        )
     doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
     live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1) if live_photo else None
     _validate_image_bytes(doc_bytes, document_image.content_type, "Document image")
@@ -723,7 +767,7 @@ async def screen_document(
     if mrz_line1 and mrz_line2:
         mrz_data = parse_td3_mrz(mrz_line1, mrz_line2)
         mrz_result = {
-            "detected": "error" not in mrz_data,
+            "detected": mrz_data.get("status") == "VALID",
             "source": "form",
             "status": str(mrz_data.get("status", "MALFORMED")),
             "confidence": 1.0 if mrz_data.get("status") == "VALID" else 0.5,
@@ -772,6 +816,16 @@ async def screen_document(
     if not mrz_result.get("detected"):
         add_factor("MRZ_NOT_DETECTED", "No structurally valid TD3 MRZ was detected.")
 
+    module_statuses = {
+        "mrz": str(mrz_result["module_state"]),
+        "face": str(face_result["module_state"]),
+        "tampering": str(tamper_result["module_state"]),
+    }
+    # Fail-safe gate: every required module must report PASS and no blocking risk
+    # factor may be present before a document can be cleared. Any FAIL, ERROR, or
+    # NOT_AVAILABLE module state (or any risk factor) forbids CLEAR.
+    module_clear_ok = not _has_blocking_module_state(module_statuses)
+
     risk_score = min(100, risk_score)
     if risk_score >= RISK_THRESHOLDS[1]:
         risk_level = "HIGH_RISK"
@@ -783,7 +837,7 @@ async def screen_document(
     if risk_score >= RISK_THRESHOLDS[1]:
         decision = "HIGH_RISK_REVIEW_REQUIRED"
         status_color = "RED"
-    elif risk_factors:
+    elif not module_clear_ok or risk_factors:
         decision = "SECONDARY_INSPECTION_REQUIRED"
         status_color = "YELLOW"
     else:
@@ -792,11 +846,6 @@ async def screen_document(
 
     processing_time_ms = int((time.perf_counter() - started_at) * 1000)
     reasons = [factor["detail"] for factor in risk_factors]
-    module_statuses = {
-        "mrz": str(mrz_result["module_state"]),
-        "face": str(face_result["module_state"]),
-        "tampering": str(tamper_result["module_state"]),
-    }
     logger.info("screen_request_completed request_id=%s status=%s risk_score=%s processing_time_ms=%s",
                 request_id, risk_level, risk_score, processing_time_ms)
 

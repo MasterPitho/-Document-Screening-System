@@ -66,6 +66,8 @@ Multipart form fields:
 - `mrz_line1`: optional exact TD3 line 1. If both MRZ fields are supplied, they are validated directly.
 - `mrz_line2`: optional exact TD3 line 2.
 
+Supplying only one of `mrz_line1` or `mrz_line2` returns HTTP 400; the API does not silently fall back to OCR when the caller explicitly supplied just one MRZ line. Supplying neither falls back to automatic OCR.
+
 Example:
 
 ```bash
@@ -75,6 +77,8 @@ curl -X POST http://localhost:8000/api/v1/screen \
 ```
 
 If MRZ fields are omitted, OCR returns `NOT_DETECTED` unless it finds a structurally valid pair. The implementation never pads short OCR output into a fake MRZ.
+
+A successful MRZ detection (`detected: true`, `status: VALID`) requires two exact 44-character lines that pass allowed-character validation, TD3 structure validation, every ICAO 9303 check digit (document number, date of birth, expiry, and composite), and date validation. A candidate pair that merely looks structurally plausible but fails checksum or date validation is retained only as diagnostic context and reported as `detected: false` with a `NOT_DETECTED`, `OCR_LOW_CONFIDENCE`, or `OCR_FAILED` state. Candidates with wrong lengths are rejected.
 
 ## Response Semantics
 
@@ -140,7 +144,7 @@ Configuration is environment-driven:
 - `RISK_UNKNOWN_MODULE`: default `15`; applied when face verification is skipped because no live photo was supplied.
 
 Risk weights are intentionally heuristic prototype values. They should be calibrated against labeled data before operational use.
-Each module also reports `module_state`: `PASS`, `FAIL`, `NOT_AVAILABLE`, or `ERROR`. Unavailable and error states cannot produce an automatic clearance.
+Each module also reports `module_state`: `PASS`, `FAIL`, `NOT_AVAILABLE`, or `ERROR`. The fail-safe `CLEARED` gate requires every required module to report `PASS` and no blocking risk factor to be present. Any module in `FAIL`, `ERROR`, or `NOT_AVAILABLE` (or any risk factor such as checksum failure, face mismatch, tampering suspected, or expired document) forces a non-clear decision (`HIGH_RISK_REVIEW_REQUIRED` or `SECONDARY_INSPECTION_REQUIRED`).
 
 ## Testing
 
@@ -150,7 +154,7 @@ Run:
 pytest -q
 ```
 
-The tests cover valid and malformed TD3 MRZ input, individual and composite checksum failures, OCR failure and wrong-length candidates, tamper output shape, unsupported API uploads, and the screened response schema.
+The tests cover valid and malformed TD3 MRZ input, individual and composite checksum failures, OCR failure and wrong-length candidates, checksum-invalid and invalid-date/invalid-character candidates not being reported as detections, tamper output shape, unsupported API uploads, the screened response schema, partial manual MRZ input returning HTTP 400, and risk-engine combinations asserting that modules in `FAIL`, `ERROR`, or `NOT_AVAILABLE` (and mismatches or suspected tampering) never produce `CLEARED`.
 
 ## Security and Privacy
 
