@@ -11,8 +11,13 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 import cv2
+import pytesseract  # type: ignore[import-untyped]
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 app = FastAPI(
     title="AI Document Screening Engine",
@@ -27,6 +32,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class FaceVerificationResult(BaseModel):
+    face_detected_in_document: bool
+    face_detected_in_live: Optional[bool] = None
+    face_bounding_box: Optional[dict[str, int]] = None
+    match_status: str
+    similarity_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+class MRZValidationResult(BaseModel):
+    detected: bool
+    source: str
+    line1: Optional[str] = None
+    line2: Optional[str] = None
+    data: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class TamperingResult(BaseModel):
+    ela_mean_intensity: float
+    ela_std_dev: float
+    edge_artifact_score: float
+    metadata_present: bool
+    confidence: float = Field(ge=0.0, le=100.0)
+    is_tampered: bool
+
+
+class RiskAssessment(BaseModel):
+    score: int = Field(ge=0, le=100)
+    status: str
+    decision: str
+    factors: list[str]
+
+
+class ScreeningModules(BaseModel):
+    tampering_analysis: TamperingResult
+    face_verification: FaceVerificationResult
+    mrz_validation: MRZValidationResult
+
+
+class ScreenResponse(BaseModel):
+    status: str
+    risk_assessment: RiskAssessment
+    modules: ScreeningModules
 
 # -------------------------------------------------------------
 # Module 1 & 2: ICAO Doc 9303 Checksum & Parser
@@ -82,6 +132,8 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
     valid_passport = verify_mrz_field(line2[0:9], passport_chk)
     valid_dob = verify_mrz_field(dob_raw, dob_chk)
     valid_expiry = verify_mrz_field(expiry_raw, expiry_chk)
+    composite_data = line2[0:10] + line2[13:20] + line2[21:28] + line2[28:43]
+    valid_composite = verify_mrz_field(composite_data, _composite_chk)
 
     # Expiry validation
     try:
@@ -107,15 +159,61 @@ def parse_td3_mrz(line1: str, line2: str) -> dict[str, object]:
         "checks": {
             "passport_number_valid": valid_passport,
             "dob_valid": valid_dob,
-            "expiry_valid": valid_expiry
+            "expiry_valid": valid_expiry,
+            "composite_valid": valid_composite,
         }
+    }
+
+
+def _clean_mrz_line(line: str) -> str:
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<")
+    return "".join(char for char in line.upper() if char in allowed)
+
+
+def extract_mrz_from_image(image_bytes: bytes) -> dict[str, object]:
+    """Read the lower passport zone and return the best two 44-character lines."""
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("L")
+        width, height = image.size
+        mrz_crop = image.crop((0, int(height * 0.55), width, height))
+        mrz_crop = mrz_crop.resize((width * 2, max(1, mrz_crop.height * 2)))
+        mrz_crop = ImageEnhance.Contrast(mrz_crop).enhance(2.0)
+        ocr_text = pytesseract.image_to_string(
+            mrz_crop,
+            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
+        )
+    except Exception as error:
+        return {
+            "detected": False,
+            "source": "ocr",
+            "error": f"MRZ OCR unavailable: {error}",
+        }
+    candidates = [_clean_mrz_line(line) for line in ocr_text.splitlines()]
+    candidates = [line for line in candidates if len(line) >= 40]
+    if len(candidates) < 2:
+        return {
+            "detected": False,
+            "source": "ocr",
+            "error": "Unable to detect two MRZ lines from the document image.",
+        }
+
+    line1 = min(candidates, key=lambda line: abs(len(line) - 44))[:44].ljust(44, "<")
+    remaining = [line for line in candidates if line != line1]
+    line2 = min(remaining, key=lambda line: abs(len(line) - 44))[:44].ljust(44, "<")
+    return {
+        "detected": True,
+        "source": "ocr",
+        "line1": line1,
+        "line2": line2,
+        "data": parse_td3_mrz(line1, line2),
     }
 
 # -------------------------------------------------------------
 # Module 3: Tampering Detection (Error Level Analysis & Splice)
 # -------------------------------------------------------------
 def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, float | bool]:
-    original = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    source_image = Image.open(io.BytesIO(image_bytes))
+    original = source_image.convert("RGB")
 
     # Recompress to JPEG at standard quality
     buffer = io.BytesIO()
@@ -139,19 +237,44 @@ def analyze_tampering_ela(image_bytes: bytes, quality: int = 90) -> dict[str, fl
     mean_diff = float(np.mean(diff_arr))
     std_diff = float(np.std(diff_arr))
 
-    # High average ELA intensity and standard deviation indicate splice/alteration
-    tamper_detected = mean_diff > 35.0 or std_diff > 45.0
+    gray = np.array(original.convert("L"))
+    edge_strength = float(np.mean(cv2.Laplacian(gray, cv2.CV_64F).var()))
+    edge_artifact_score = min(100.0, edge_strength / 25.0)
+    metadata_present = bool(source_image.info)
+    confidence = min(
+        100.0,
+        round((mean_diff / 50.0) * 55.0 + (std_diff / 70.0) * 25.0 + edge_artifact_score * 0.2, 1),
+    )
+    tamper_detected = confidence >= 60.0
 
     return {
         "ela_mean_intensity": round(mean_diff, 2),
         "ela_std_dev": round(std_diff, 2),
+        "edge_artifact_score": round(edge_artifact_score, 2),
+        "metadata_present": metadata_present,
         "is_tampered": tamper_detected,
-        "confidence": min(100.0, round((mean_diff / 50.0) * 100, 1))
+        "confidence": confidence,
     }
 
 # -------------------------------------------------------------
-# Module 4: Face Detection & Match (OpenCV Haar / Histogram)
+# Module 4: Face Detection & Match (OpenCV Haar / cosine embedding)
 # -------------------------------------------------------------
+def _face_embedding(face_crop: Any) -> np.ndarray:
+    normalized = cv2.resize(face_crop, (64, 64)).astype(np.float32) / 255.0
+    normalized = cv2.equalizeHist((normalized * 255).astype(np.uint8)).astype(np.float32)
+    vector = normalized.flatten()
+    norm = float(np.linalg.norm(vector))
+    return vector / norm if norm else vector
+
+
+def _cosine_similarity(first: np.ndarray, second: np.ndarray) -> float:
+    first_norm = float(np.linalg.norm(first))
+    second_norm = float(np.linalg.norm(second))
+    if not first_norm or not second_norm:
+        return 0.0
+    return float(np.dot(first, second) / (first_norm * second_norm))
+
+
 def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = None) -> dict[str, object]:
     # Decode doc image
     doc_nparr = np.frombuffer(doc_bytes, np.uint8)
@@ -190,7 +313,7 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
             "face_detected_in_document": True,
             "face_bounding_box": {"x": int(x), "y": int(y), "w": int(w), "h": int(h)},
             "match_status": "SKIPPED_NO_LIVE_PHOTO",
-            "similarity_score": 1.0
+            "similarity_score": None
         }
 
     # Process live image
@@ -218,14 +341,9 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
     (lx, ly, lw, lh) = live_faces[0]
     live_face_crop = cv2.resize(live_gray[ly:ly+lh, lx:lx+lw], (150, 150))
 
-    # Fast correlation similarity check on normalized face crops
-    hist_doc = cv2.calcHist([doc_face_crop], [0], None, [64], [0, 256])
-    hist_live = cv2.calcHist([live_face_crop], [0], None, [64], [0, 256])
-    cv2.normalize(hist_doc, hist_doc, 0, 1, cv2.NORM_MINMAX)
-    cv2.normalize(hist_live, hist_live, 0, 1, cv2.NORM_MINMAX)
-
-    sim_score = float(cv2.compareHist(hist_doc, hist_live, cv2.HISTCMP_CORREL))
-    sim_score = max(0.0, min(1.0, sim_score))
+    doc_embedding = _face_embedding(doc_face_crop)
+    live_embedding = _face_embedding(live_face_crop)
+    sim_score = max(0.0, min(1.0, _cosine_similarity(doc_embedding, live_embedding)))
 
     matched = sim_score >= 0.60
     return {
@@ -238,18 +356,27 @@ def extract_and_verify_faces(doc_bytes: bytes, live_bytes: Optional[bytes] = Non
 # -------------------------------------------------------------
 # Module 5: Risk Engine & Screening Endpoint
 # -------------------------------------------------------------
-@app.post("/api/v1/screen")
+@app.post("/api/v1/screen", response_model=ScreenResponse)
 async def screen_document(
     document_image: UploadFile = File(...),
     live_photo: Optional[UploadFile] = File(None),
     mrz_line1: Optional[str] = Form(None),
     mrz_line2: Optional[str] = Form(None)
 ) -> dict[str, object]:
-    doc_bytes = await document_image.read()
-    live_bytes = await live_photo.read() if live_photo else None
+    if document_image.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail="Document must be JPG, PNG, or WebP.")
+    if live_photo and live_photo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail="Live photo must be JPG, PNG, or WebP.")
+
+    doc_bytes = await document_image.read(MAX_IMAGE_BYTES + 1)
+    live_bytes = await live_photo.read(MAX_IMAGE_BYTES + 1) if live_photo else None
 
     if not doc_bytes:
         raise HTTPException(status_code=400, detail="Document image is empty.")
+    if len(doc_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Document image must be 10 MB or smaller.")
+    if live_bytes and len(live_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Live photo must be 10 MB or smaller.")
 
     try:
         Image.open(io.BytesIO(doc_bytes)).verify()
@@ -274,10 +401,19 @@ async def screen_document(
     # 2. Face verification
     face_result = extract_and_verify_faces(doc_bytes, live_bytes)
 
-    # 3. MRZ validation (if passed or simulated)
-    mrz_result: Optional[dict[str, Any]] = None
+    # 3. MRZ validation: use submitted lines, otherwise read the image automatically.
+    mrz_result: dict[str, object]
     if mrz_line1 and mrz_line2:
-        mrz_result = parse_td3_mrz(mrz_line1, mrz_line2)
+        mrz_data = parse_td3_mrz(mrz_line1, mrz_line2)
+        mrz_result = {
+            "detected": "error" not in mrz_data,
+            "source": "form",
+            "line1": mrz_line1,
+            "line2": mrz_line2,
+            "data": mrz_data,
+        }
+    else:
+        mrz_result = extract_mrz_from_image(doc_bytes)
 
     # 4. Composite Risk Score (0 - 100)
     risk_score = 0
@@ -291,16 +427,16 @@ async def screen_document(
         risk_score += 35
         risk_factors.append("Live individual does not match document photo")
 
-    if isinstance(mrz_result, dict):
-        checks = mrz_result.get("checks")
-        if isinstance(checks, dict):
-            for check, valid in checks.items():
-                if not valid:
-                    risk_score += 20
-                    risk_factors.append(f"Checksum failure: {check}")
-        if mrz_result.get("is_expired"):
-            risk_score += 25
-            risk_factors.append("Travel document is expired")
+    mrz_data = mrz_result.get("data")
+    checks = mrz_data.get("checks") if isinstance(mrz_data, dict) else None
+    if isinstance(checks, dict):
+        for check, valid in checks.items():
+            if not valid:
+                risk_score += 20
+                risk_factors.append(f"Checksum failure: {check}")
+    if isinstance(mrz_data, dict) and mrz_data.get("is_expired"):
+        risk_score += 25
+        risk_factors.append("Travel document is expired")
 
     risk_score = min(100, risk_score)
 

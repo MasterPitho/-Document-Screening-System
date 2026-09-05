@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
+    tesseract-ocr \
     curl \
     && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
@@ -16,6 +17,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+  && chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 

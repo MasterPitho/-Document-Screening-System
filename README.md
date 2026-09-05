@@ -30,6 +30,8 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Automatic MRZ OCR requires the Tesseract executable. Docker installs it automatically. On Windows, install Tesseract separately and ensure `tesseract.exe` is on `PATH`.
+
 ---
 
 ## API Documentation
@@ -42,6 +44,8 @@ Uploads a document image and optional live photo to perform tamper check, checks
 - `live_photo` *(File, optional)*: Live camera snapshot of the traveler.
 - `mrz_line1` *(Text, optional)*: Line 1 of the passport MRZ zone (44 chars).
 - `mrz_line2` *(Text, optional)*: Line 2 of the passport MRZ zone (44 chars).
+
+If both MRZ fields are omitted, the API automatically crops the lower part of the document, runs OCR, and validates the detected TD3 lines. Images must be JPG, PNG, or WebP and are limited to 10 MB per upload.
 
 **Response Schema:**
 ```json
@@ -56,6 +60,9 @@ Uploads a document image and optional live photo to perform tamper check, checks
   "modules": {
     "tampering_analysis": {
       "ela_mean_intensity": 14.2,
+      "ela_std_dev": 8.1,
+      "edge_artifact_score": 3.2,
+      "metadata_present": true,
       "is_tampered": false,
       "confidence": 28.4
     },
@@ -66,6 +73,11 @@ Uploads a document image and optional live photo to perform tamper check, checks
       "match_status": "MATCH"
     },
     "mrz_validation": {
+      "detected": true,
+      "source": "form",
+      "line1": "P<IND...",
+      "line2": "M123...",
+      "data": {
       "doc_type": "P",
       "issuing_country": "IND",
       "full_name": "KUMAR RAHUL",
@@ -74,7 +86,9 @@ Uploads a document image and optional live photo to perform tamper check, checks
       "checks": {
         "passport_number_valid": true,
         "dob_valid": true,
-        "expiry_valid": true
+        "expiry_valid": true,
+        "composite_valid": true
+      }
       }
     }
   }
