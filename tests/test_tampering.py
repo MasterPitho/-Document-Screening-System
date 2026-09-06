@@ -51,14 +51,19 @@ def test_metadata_absence_is_not_tampering(jpeg_bytes):
 
 def test_forced_suspicious_signals_flag_suspicious(jpeg_bytes):
     class _Noisy(TamperingDetector):
+
         def _ela_signal(self, arr):
             return {"score": 95.0, "suspicious": True}
+
         def _compression_signal(self, arr):
             return {"score": 95.0, "suspicious": True}
+
         def _noise_signal(self, arr):
             return {"score": 95.0, "suspicious": True}
+
         def _edge_signal(self, arr):
             return {"score": 95.0, "suspicious": True}
+
         def _copy_move_signal(self, arr):
             return {"score": 95.0, "suspicious": True}
 
@@ -71,14 +76,19 @@ def test_forced_suspicious_signals_flag_suspicious(jpeg_bytes):
 
 def test_moderate_signals_without_flags_are_inconclusive(jpeg_bytes):
     class _Mixed(TamperingDetector):
+
         def _ela_signal(self, arr):
             return {"score": 50.0, "suspicious": False}
+
         def _compression_signal(self, arr):
             return {"score": 50.0, "suspicious": False}
+
         def _noise_signal(self, arr):
             return {"score": 50.0, "suspicious": False}
+
         def _edge_signal(self, arr):
             return {"score": 50.0, "suspicious": False}
+
         def _copy_move_signal(self, arr):
             return {"score": 50.0, "suspicious": False}
 

@@ -125,6 +125,59 @@ def test_no_live_photo_never_cleared():
 
 
 # ---------------------------------------------------------------------------
+# Passive liveness (PAD)
+# ---------------------------------------------------------------------------
+
+def test_liveness_live_allows_cleared():
+    result = _engine().evaluate(
+        mrz_result=_valid_mrz(), face_result=_match_face(), tamper_result=_clean_tamper(),
+        liveness_result={"liveness_status": "LIVE"},
+    )
+    assert result["decision"] == "CLEARED"
+    assert result["module_statuses"]["liveness"] == "PASS"
+
+
+def test_liveness_not_checked_never_cleared():
+    result = _engine().evaluate(
+        mrz_result=_valid_mrz(), face_result=_match_face(), tamper_result=_clean_tamper(),
+        liveness_result={"liveness_status": "NOT_CHECKED"},
+    )
+    assert result["decision"] != "CLEARED"
+    assert result["module_statuses"]["liveness"] == "NOT_AVAILABLE"
+
+
+def test_liveness_spoof_forces_high_risk_regardless_of_score():
+    engine = _engine(_settings(risk_reject_threshold=100))
+    result = engine.evaluate(
+        mrz_result=_valid_mrz(), face_result=_match_face(), tamper_result=_clean_tamper(),
+        liveness_result={"liveness_status": "SPOOF_DETECTED", "liveness_score": 0.1},
+    )
+    assert any(f["factor"] == "LIVENESS_FAILED" for f in result["factors"])
+    assert result["decision"] == "HIGH_RISK_REVIEW_REQUIRED"
+    assert result["level"] == "HIGH_RISK"
+    assert result["status"] == "RED"
+    assert result["module_statuses"]["liveness"] == "FAIL"
+
+
+def test_liveness_uncertain_adds_review_penalty():
+    result = _engine().evaluate(
+        mrz_result=_valid_mrz(), face_result=_match_face(), tamper_result=_clean_tamper(),
+        liveness_result={"liveness_status": "UNCERTAIN"},
+    )
+    assert any(f["factor"] == "LIVENESS_UNCERTAIN" for f in result["factors"])
+    assert result["decision"] != "CLEARED"
+    assert result["module_statuses"]["liveness"] == "REVIEW"
+
+
+def test_liveness_absent_keeps_legacy_module_statuses():
+    result = _engine().evaluate(
+        mrz_result=_valid_mrz(), face_result=_match_face(), tamper_result=_clean_tamper(),
+    )
+    assert "liveness" not in result["module_statuses"]
+    assert result["decision"] == "CLEARED"
+
+
+# ---------------------------------------------------------------------------
 # Decisions
 # ---------------------------------------------------------------------------
 

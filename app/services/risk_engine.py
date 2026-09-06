@@ -13,7 +13,7 @@ Guarantees:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.config import Settings
 
@@ -67,6 +67,23 @@ def tampering_module_state(result: Dict[str, Any]) -> str:
     return "NOT_AVAILABLE"
 
 
+def liveness_module_state(result: Dict[str, Any]) -> str:
+    """Map a passive-liveness result to a module state.
+
+    ``NOT_CHECKED`` is deliberately ``NOT_AVAILABLE``: a capture that was not
+    assessed can never contribute to a ``CLEARED`` decision (consistent with
+    the face module treating a missing live photo as uncertain).
+    """
+    status = result.get("liveness_status") or result.get("status")
+    if status == "LIVE":
+        return "PASS"
+    if status == "SPOOF_DETECTED":
+        return "FAIL"
+    if status == "UNCERTAIN":
+        return "REVIEW"
+    return "NOT_AVAILABLE"
+
+
 class RiskEngine:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -91,9 +108,11 @@ class RiskEngine:
         face_result: Dict[str, Any],
         tamper_result: Dict[str, Any],
         image_quality: float = 1.0,
+        liveness_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         score = [0]
         factors: List[Dict[str, Any]] = []
+        forced_high_risk = False
 
         # ---- Tampering ----
         tamper_status = tamper_result.get("status")
@@ -150,18 +169,36 @@ class RiskEngine:
         if image_quality < 0.05:
             self.add_factor("IMAGE_QUALITY", "Image quality is too poor for reliable analysis.", factors, score)
 
+        # ---- Passive liveness (PAD) ----
+        if liveness_result is not None:
+            liveness_status = liveness_result.get("liveness_status")
+            if liveness_status == "SPOOF_DETECTED":
+                self.add_factor(
+                    "LIVENESS_FAILED",
+                    "Passive liveness flagged a presentation attack; "
+                    "immediate high-risk review required.",
+                    factors, score)
+                forced_high_risk = True
+            elif liveness_status == "UNCERTAIN":
+                self.add_factor(
+                    "LIVENESS_UNCERTAIN",
+                    "Liveness check was inconclusive; review penalty applied.",
+                    factors, score)
+
         module_statuses = {
             "mrz": mrz_module_state(mrz_result),
             "face": face_module_state(face_result),
             "tampering": tampering_module_state(tamper_result),
         }
+        if liveness_result is not None:
+            module_statuses["liveness"] = liveness_module_state(liveness_result)
 
         # Fail-safe gate: any module not reporting PASS (or face having no live
         # photo) forbids CLEARED.
         any_not_pass = any(state != "PASS" for state in module_statuses.values())
 
         risk_score = max(0, min(100, score[0]))
-        if risk_score >= self.reject_threshold:
+        if forced_high_risk or risk_score >= self.reject_threshold:
             risk_level = "HIGH_RISK"
             decision = "HIGH_RISK_REVIEW_REQUIRED"
             status_color = "RED"

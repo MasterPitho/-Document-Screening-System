@@ -5,7 +5,6 @@ import io
 import uuid
 from dataclasses import replace
 
-import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 

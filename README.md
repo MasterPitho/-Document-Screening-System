@@ -1,6 +1,43 @@
 # Document Screening Engine
 
-An explainable **Smart India Hackathon prototype** for document screening. It validates TD3 passport MRZ data, runs a multi-signal image-forensics pipeline, verifies faces with **InsightFace ArcFace embeddings** (ONNX Runtime), and computes a transparent, deterministic risk score. It is **not** a guarantee of document authenticity and **not** an autonomous identity decision; a trained human officer remains the final decision maker.
+An explainable **Smart India Hackathon prototype** for document screening. It validates machine-readable identity documents, runs a multi-signal image-forensics pipeline, verifies faces with **InsightFace ArcFace embeddings** (ONNX Runtime), adds **passive presentation-attack (liveness) screening**, and computes a transparent, deterministic risk score. It is **not** a guarantee of document authenticity and **not** an autonomous identity decision; a trained human officer remains the final decision maker.
+
+## 1. Problem Statement
+
+### 1a. Operational Pain Points
+
+- **High-throughput inspection bottlenecks.** At border checkpoints and enrolment desks, officers physically inspect every document. Manual MRZ transcription, glance-level liveness judgement, and page-by-page tamper checks do not scale to peak-hour queues and create long dwell times.
+- **Operator cognitive fatigue.** Continuous visual scrutiny degrades accuracy over a shift. Fatigue-driven misses (a wrong face, an undetected micro-tamper, an expired document) are silent, correlated failures — exactly the kind a machine should catch first.
+- **Undetected micro-tampering.** High-resolution edits, photo-substitution, JPEG recompression artifacts, and print/scan recapture survive casual inspection. These leave forensic traces (Error-Level-Analysis residuals, compression/noise anomalies, moiré patterns, blur) that are invisible to the naked eye but measurable.
+- **Opaque "black-box" decision models.** A model that returns a bare score without reasons cannot be audited, challenged by an officer, or defended in a border-security context. In a state handling identity decisions, an unexplainable verdict is operationally and legally unusable.
+
+### 1b. Technical Challenge
+
+Screen a physical identity document through **multi-modal triage** — a machine-readable zone (MRZ), digital image forensics, and biometric face matching — and fuse the signals into one explainable decision, **without persisting sensitive PII or raw biometrics**:
+
+1. **Physical-document channel:** parse ICAO 9303 MRZ (TD3 passports today), validate structure, checksums, and dates; OCR-fallback when the zone is not typed in.
+2. **Heuristic digital-forensics channel:** ELA, compression, noise, edge, copy-move, and metadata signals that localize *suspected* regions (never a forgery classifier).
+3. **Biometric channel:** ArcFace face verification of the document photograph against an optional live capture, plus **passive liveness** (texture/FFT/colour forensics, ONNX anti-spoofing when a model is present) to screen for printouts and screen recaptures.
+4. **Privacy constraint:** all analysis executes strictly in memory. Raw images, embeddings, MRZ text, passport numbers and names are never stored or logged.
+
+### 1c. System Objectives
+
+- **Assisted human-in-the-loop routing.** The engine triages automatically and routes to one of three outcomes — `CLEARED`, `SECONDARY_INSPECTION_REQUIRED`, `HIGH_RISK_REVIEW_REQUIRED` — with a human officer as the final decision maker. It never decides autonomously.
+- **Transparent deterministic weighting.** Every activated risk factor has an explicit, documented weight; unknown factors raise an error rather than being silently assigned a weight. The score is a bounded, reproducible sum (0–100), not a learned probability.
+- **Strict in-memory execution.** No upload, crop, frame, embedding, or MRZ string touches disk (except the privacy-preserving audit *metadata* row described below). Component singletons are created at app startup, never per request.
+
+### 1d. Multi-Document Expansion Roadmap
+
+- **Phase 1 (current):** ICAO 9303 **TD3 passports** — two 44-character MRZ lines, OCR candidate filtering, 7-3-1 checksums, pivot-year date semantics. Implemented behind a strategy interface (see `app/services/mrz.py`).
+- **Phase 2 (blueprint):** `NationalIDParser` stub with **TD1 (three 30-character lines)** structural validation and a **QR payload extraction placeholder** for Aadhaar-style secure QR codes — architected now, validation depth to be completed.
+- **Phase 3 (blueprint):** **Aadhaar QR/XML** parsing (secure QR envelope → decrypted XML fields) and **PAN OCR layout parsing** (fixed 128×128 card line layout), both fitted into the same `DocumentParserRouter`.
+- **Router contract:** the parser is selected either by an explicit `document_type` request parameter (`auto | td3 | passport | td1 | national_id | aadhaar`) or, in `auto` mode, by the document image aspect ratio (a passport data page is portrait, ratio `< 1.45`; an ID-1 card is landscape, ratio `>= 1.45`). Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through the same `BaseDocumentParser` interface, so the pipeline never changes when a new document type is added.
+
+### 1e. Security Boundaries
+
+- **This system performs 1:1 facial verification** — proving the document photograph and the live capture depict the *same person*. It does **not** perform identification against a gallery.
+- **Liveness screening is passive and heuristic.** It detects common presentation attacks (printed photo, screen recapture) via ONNX anti-spoofing when weights are baked in, and falls back to OpenCV texture/frequency analysis (FFT high-frequency distribution, Laplacian blur, HSV/YCrCb colour histograms, moiré periodicity). It is **not** active-challenge anti-spoofing (no "blink now" prompt), **not** a certified PAD system, and can be evaded by sophisticated masks/video-replay. A `SPOOF_DETECTED` verdict forces `HIGH_RISK_REVIEW_REQUIRED`; an `UNCERTAIN` verdict applies a review penalty. This is a **triage aid, not a security guarantee**.
+- Raw biometrics, embeddings, and liveness crops exist only in memory for the duration of a request. The audit trail stores screening metadata only.
 
 ## Current Scope
 
@@ -8,17 +45,20 @@ An explainable **Smart India Hackathon prototype** for document screening. It va
 - Automatic MRZ OCR via Tesseract when the caller omits the MRZ form fields.
 - Multi-signal image-forensics analysis: ELA, JPEG compression, noise, edge, lightweight copy-move (duplicate-region), and metadata presence. These are heuristic indicators, not a forgery classifier.
 - Face verification with InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime). Detection is SCRFD (InsightFace `FaceAnalysis`), faces are aligned, and the L2-normalized ArcFace embeddings of the document face and an optional live photo are compared by cosine similarity; **exactly one** face per image is accepted (extra/missing/low-confidence faces are reported, never guessed). The model is downloaded once at startup (or baked into the Docker image).
+- Passive liveness screening (`app/services/liveness.py`): MiniFASNet-style ONNX anti-spoofing wrapper when `LIVENESS_MODEL_PATH` is configured, with an OpenCV heuristic fallback (FFT high-frequency power, Laplacian blur, colour-space histograms, moiré detection). Output is `LIVE` / `SPOOF_DETECTED` / `UNCERTAIN` / `NOT_CHECKED`, fully in memory.
 - Explainable risk score: weighted factors with explicit, documented weights. Weights are heuristic prototype values, not calibrated probabilities.
 
 ## Processing Pipeline
 
 ```text
 Upload validation (byte size, MIME, extension, signature, pixel count, dimensions)
-    -> MRZ form input, or Tesseract OCR candidate pipeline
-    -> TD3 structure + ICAO 9303 checksum + date validation
+    -> Document parser router (aspect ratio / document_type)
+         -> TD3 passport: MRZ form input, or Tesseract OCR candidate pipeline
+         -> National ID (stub): TD1 3-line structure + QR payload placeholder
     -> Tamper signals: ELA + compression + noise + edges + copy-move + metadata
     -> Face verification: InsightFace ArcFace embeddings (doc vs live photo)
-    -> Deterministic, explainable risk engine (weights, module gates)
+    -> Passive liveness (PAD): ONNX anti-spoofing or OpenCV texture/frequency fallback
+    -> Deterministic, explainable risk engine (weights, module gates, liveness gate)
     -> PostgreSQL-backed privacy-preserving audit record (SQLAlchemy + Alembic)
 ```
 
@@ -33,7 +73,7 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
   - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`) with indexes.
   - `repositories.py` — the only module that opens sessions; one short-lived session per operation (`ScreeningRepository`, `AuditLogRepository`, `UserRepository`, `AuthTokenRepository`).
 - `app/api/` — `auth.py` (register/login/logout/me, bearer-token helpers, `extract_optional_user` for anonymous screenings) and `helpers.py` (shared request utilities).
-- `app/services/` — `mrz.py` (TD3 parser + Tesseract OCR), `tampering.py` (multi-signal forensics), `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests), `risk_engine.py` (weighted deterministic scoring).
+- `app/services/` — `mrz.py` (strategy-based document parsers: `BaseDocumentParser`, `TD3PassportParser`, `NationalIDParser` stub, `DocumentParserRouter`, plus backward-compatible OCR), `tampering.py` (multi-signal forensics), `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests), `liveness.py` (passive ONNX + OpenCV presentation-attack screening), `risk_engine.py` (weighted deterministic scoring).
 - `app/security/image_validation.py` — upload hardening (byte size, MIME, extension, signature, pixel count, dimensions).
 - `app/models/schemas.py` — Pydantic request/response models.
 - `database.py` (repo root) — a backward-compatible shim re-exporting the `app.db` models plus `engine`/`SessionLocal`/`get_db`/`init_db` so legacy tooling imports keep working.
@@ -120,6 +160,13 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `FACE_DET_SIZE` | `640` | Detection input size. |
 | `FACE_CTX_ID` | `-1` | `-1` = CPU. |
 | `FACE_MODELS_DIR` | `~/.insightface` | InsightFace model cache (mounted as `/opt/insightface` in Docker). |
+| `LIVENESS_ENABLED` | `true` | Master switch for passive liveness screening. |
+| `LIVENESS_MODEL_PATH` | _(empty)_ | Path to a MiniFASNet/Silent-Face-style `.onnx` anti-spoofing model. Empty = heuristic fallback only. |
+| `LIVENESS_HEURISTIC_ENABLED` | `true` | Allow the OpenCV texture/frequency fallback when no ONNX model is configured. |
+| `LIVENESS_SPOOF_THRESHOLD` | `0.40` | Liveness score at/below which the capture is `SPOOF_DETECTED`. |
+| `LIVENESS_UNCERTAIN_THRESHOLD` | `0.60` | Score below which (but above `LIVENESS_SPOOF_THRESHOLD`) is `UNCERTAIN`; at/above it is `LIVE`. |
+| `LIVENESS_MODEL_INPUT_SIZE` | `160` | ONNX model input square size (e.g. 160 for MiniFASNet-style nets). |
+| `LIVENESS_MODEL_CTX_ID` | `-1` | `-1` = CPU execution provider. |
 | `TAMPERING_THRESHOLD` | `70` | Aggregate tamper score at/above which the image is `SUSPICIOUS`. |
 | `TAMPERING_REVIEW_THRESHOLD` | `45` | Aggregate score at/above which the image is moved to `INCONCLUSIVE` review. |
 | `MRZ_YEAR_PIVOT` | `50` | Two-digit years decode as 20xx when below the pivot, 19xx at/above it (00–49 → 2000–2049, 50–99 → 1950–1999). |
@@ -138,6 +185,8 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `RISK_IMAGE_QUALITY` | `10` | Reserved for image-quality signals. |
 | `RISK_MODULE_ERROR` | `25` | Applied when a module fails internally. |
 | `RISK_UNKNOWN_MODULE` | `15` | Applied when face verification is skipped (no live photo). |
+| `RISK_LIVENESS_FAILED` | `50` | Applied (and forces `HIGH_RISK_REVIEW_REQUIRED`) when liveness returns `SPOOF_DETECTED`. |
+| `RISK_LIVENESS_UNCERTAIN` | `15` | Review penalty when liveness returns `UNCERTAIN`. |
 | `DATABASE_URL` | `sqlite:///./document_screening.db` | Any SQLAlchemy URL; PostgreSQL recommended (`postgresql+psycopg://user:pass@host:5432/db`). |
 | `DB_CONNECT_TIMEOUT` | `5` | Seconds allowed for a PostgreSQL connect (also used for the readiness probe). |
 | `DB_CONNECT_RETRIES` | `5` | Startup re-attempts for `create_all` while PostgreSQL is still booting. |
@@ -164,10 +213,11 @@ Multipart form fields:
 
 - `document_image`: required JPG, PNG, or WebP document image.
 - `live_photo`: optional JPG, PNG, or WebP live image.
-- `mrz_line1`: optional exact TD3 line 1.
-- `mrz_line2`: optional exact TD3 line 2.
+- `mrz_line1`: optional exact TD3 line 1 (passport MRZ form path).
+- `mrz_line2`: optional exact TD3 line 2 (passport MRZ form path).
+- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`/`aadhaar`. When `auto`, the parser is chosen by the document image aspect ratio (portrait passport data page vs. landscape ID-1 card).
 
-Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection.
+Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td1|national_id|aadhaar` returns HTTP 422.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/screen \
@@ -247,17 +297,21 @@ A successful screening returns HTTP 200 with a heuristic, human-review verdict:
                                      "edge": {...}, "copy_move": {...}, "metadata": {...}},
                          "suspicious_regions": [], "explanation": []},
   "face_verification": {"status": "SKIPPED_NO_LIVE_PHOTO", "similarity_score": null,
-                        "matched": null, "module_state": "NOT_AVAILABLE"}
+                        "matched": null, "module_state": "NOT_AVAILABLE"},
+  "liveness": {"is_live": false, "liveness_score": 0.0, "liveness_status": "NOT_CHECKED",
+               "method": "not_checked", "signals": {}, "explanation": "...",
+               "module_state": "NOT_AVAILABLE"}
 }
 ```
 
-Decisions: `CLEARED` (all modules `PASS`, no risk factors), `SECONDARY_INSPECTION_REQUIRED` (any module below `PASS` or any risk factor), or `HIGH_RISK_REVIEW_REQUIRED` (score at/above the reject threshold). Fail-safe gate: none of `FAIL`, `ERROR`, or `NOT_AVAILABLE` module states can produce `CLEARED`.
+Decisions: `CLEARED` (all modules `PASS`, no risk factors), `SECONDARY_INSPECTION_REQUIRED` (any module below `PASS` or any risk factor), or `HIGH_RISK_REVIEW_REQUIRED` (score at/above the reject threshold, **or** liveness returns `SPOOF_DETECTED`). Fail-safe gate: none of `FAIL`, `ERROR`, or `NOT_AVAILABLE` module states can produce `CLEARED`.
 
 Key states:
 
-- MRZ: `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `OCR_FAILED`, `OCR_LOW_CONFIDENCE`.
+- MRZ: `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `OCR_FAILED`, `OCR_LOW_CONFIDENCE` — plus document-level `format` (`TD3`/`TD1`/`UNKNOWN`) and `document_type` (`PASSPORT`/`NATIONAL_ID`/`UNKNOWN`).
 - Tamper: `CLEAN`, `SUSPICIOUS`, `INCONCLUSIVE`, `ERROR` — with per-signal `score`/`suspicious` entries for `ela`, `compression`, `noise`, `edge`, `copy_move`, `metadata`. A failed signal degrades to `0`/`not suspicious` within the aggregate score rather than crashing the analysis.
 - Face: `MATCH`, `MISMATCH`, `NO_FACE`, `MULTIPLE_FACES`, `LOW_CONFIDENCE`, `INVALID_IMAGE`, `SKIPPED_NO_LIVE_PHOTO`, `ERROR`, `NOT_AVAILABLE`.
+- Liveness: `LIVE`, `SPOOF_DETECTED`, `UNCERTAIN`, `NOT_CHECKED` — `is_live` is `true` only for `LIVE`; the `signals` object exposes per-signal heuristic scores and reasons when the OpenCV fallback ran.
 - Module state: `PASS`, `FAIL`, `REVIEW`, `ERROR`, `NOT_AVAILABLE`.
 
 ## Error Format
@@ -284,7 +338,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The suite (123 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, tamper statuses including INCONCLUSIVE handling, the uniform-blank-image copy-move regression, and metadata-absence neutrality; the fail-safe and high-risk decision gates, unknown-risk-factor rejection, ArcFace engine statuses (NO_FACE/MULTIPLE_FACES/LOW_CONFIDENCE/MATCH/MISMATCH), deterministic face bounding-box reporting, NaN/division-by-zero protection, X-Request-ID echo and sanitization, /health and /ready behavior, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, pixel-count and decompression-bomb protection), structured error bodies, safe handling of unexpected internal errors, plus the audit trail, authentication flow, protected history/report endpoints, summary rollup, repository CRUD with duplicate-request_id rejection, pagination/filters, dashboard stats, factor normalization, Alembic upgrade/downgrade/check, graceful behaviour when the database is unreachable (503, no leaks), and token-expiry comparisons with both naive (SQLite) and timezone-aware (PostgreSQL) timestamps.
+The suite (159 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, TD1 structural parsing and checksums, parser routing by aspect ratio and explicit `document_type`, tamper statuses including INCONCLUSIVE handling, the uniform-blank-image copy-move regression, metadata-absence neutrality, passive-liveness classification (blank/spoof, noise/live, threshold boundaries, NOT_CHECKED and disabled paths, heuristic signal bounds, module-state mapping), the fail-safe and high-risk decision gates including the forced high-risk liveness gate, unknown-risk-factor rejection, ArcFace engine statuses (NO_FACE/MULTIPLE_FACES/LOW_CONFIDENCE/MATCH/MISMATCH), deterministic face bounding-box reporting, NaN/division-by-zero protection, X-Request-ID echo and sanitization, /health and /ready behavior, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, pixel-count and decompression-bomb protection), structured error bodies, safe handling of unexpected internal errors, plus the audit trail, authentication flow, protected history/report endpoints, summary rollup, repository CRUD with duplicate-request_id rejection, pagination/filters, dashboard stats, factor normalization, Alembic upgrade/downgrade/check, graceful behaviour when the database is unreachable (503, no leaks), and token-expiry comparisons with both naive (SQLite) and timezone-aware (PostgreSQL) timestamps.
 
 ## Security and Privacy
 
@@ -311,9 +365,10 @@ The suite (123 tests) covers valid/malformed MRZ, all checksum failures, pivot-y
 
 Not production-grade identity verification:
 
-- TD3 OCR can fail on low-quality or unusual scans.
-- Face verification scores are not calibrated probabilities; the embedding model is a research checkpoint and liveness detection is out of scope.
+- TD3 OCR can fail on low-quality or unusual scans. TD1 / national-ID parsing is a structural stub (QR payload decoding and layout-parsing depth are roadmap items, not production claims).
+- Face verification scores are not calibrated probabilities; the embedding model is a research checkpoint.
+- Liveness screening is **passive and heuristic**: it detects printed-photo and screen-recapture presentations in common cases but is not certified PAD and can be evaded by sophisticated masks or video replay.
 - Tamper scoring is a heuristic (ELA + compression + noise + edge + copy-move + metadata) signal set, not a trained forgery classifier.
 - Risk weights are not probabilities and the risk engine is deterministic, not learned.
 - The MRZ pivot-year rule is a heuristic for two-digit years; it is not an authoritative issuance-date source.
-- Additional document formats, calibrated datasets, liveness checks, and human-reviewed evaluation are required before deployment.
+- Additional document formats, calibrated datasets, certified liveness, and human-reviewed evaluation are required before deployment.

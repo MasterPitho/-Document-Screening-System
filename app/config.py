@@ -37,6 +37,13 @@ def _csv_value(name: str, legacy_name: str, default: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _bool_value(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     cors_origins: list[str]
@@ -63,6 +70,15 @@ class Settings:
     face_det_size: int
     face_ctx_id: int
     face_models_dir: str
+
+    # Passive liveness / presentation attack detection (PAD)
+    liveness_enabled: bool
+    liveness_model_path: str
+    liveness_heuristic_enabled: bool
+    liveness_spoof_threshold: float
+    liveness_uncertain_threshold: float
+    liveness_model_input_size: int
+    liveness_model_ctx_id: int
 
     # Tampering
     tampering_threshold: float
@@ -103,6 +119,8 @@ class Settings:
             "IMAGE_QUALITY": _int_value("RISK_IMAGE_QUALITY", 10),
             "MODULE_ERROR": _int_value("RISK_MODULE_ERROR", 25),
             "UNKNOWN_MODULE": _int_value("RISK_UNKNOWN_MODULE", 15),
+            "LIVENESS_FAILED": _int_value("RISK_LIVENESS_FAILED", 50),
+            "LIVENESS_UNCERTAIN": _int_value("RISK_LIVENESS_UNCERTAIN", 15),
         }
 
         return cls(
@@ -136,6 +154,13 @@ class Settings:
             face_det_size=_int_value("FACE_DET_SIZE", 640),
             face_ctx_id=_int_value("FACE_CTX_ID", -1),
             face_models_dir=os.getenv("FACE_MODELS_DIR", "~/.insightface").strip(),
+            liveness_enabled=_bool_value("LIVENESS_ENABLED", True),
+            liveness_model_path=os.getenv("LIVENESS_MODEL_PATH", "").strip(),
+            liveness_heuristic_enabled=_bool_value("LIVENESS_HEURISTIC_ENABLED", True),
+            liveness_spoof_threshold=_float_value("LIVENESS_SPOOF_THRESHOLD", 0.40),
+            liveness_uncertain_threshold=_float_value("LIVENESS_UNCERTAIN_THRESHOLD", 0.60),
+            liveness_model_input_size=_int_value("LIVENESS_MODEL_INPUT_SIZE", 160),
+            liveness_model_ctx_id=_int_value("LIVENESS_MODEL_CTX_ID", -1),
             tampering_threshold=_float_value("TAMPERING_THRESHOLD", 70.0),
             tampering_review_threshold=_float_value("TAMPERING_REVIEW_THRESHOLD", 45.0),
             risk_review_threshold=_int_value(
@@ -181,6 +206,12 @@ class Settings:
         _check(self.face_ctx_id >= 0 or self.face_ctx_id == -1,
                "FACE_CTX_ID must be a valid device id or -1 for CPU")
         _check(bool(self.face_models_dir), "FACE_MODELS_DIR cannot be empty")
+        _check(0.0 <= self.liveness_spoof_threshold < self.liveness_uncertain_threshold <= 1.0,
+               "Liveness thresholds must satisfy 0 <= spoof < uncertain <= 1")
+        _check(self.liveness_model_input_size > 0,
+               "LIVENESS_MODEL_INPUT_SIZE must be greater than zero")
+        _check(self.liveness_model_ctx_id >= 0 or self.liveness_model_ctx_id == -1,
+               "LIVENESS_MODEL_CTX_ID must be a valid device id or -1 for CPU")
         _check(0.0 <= self.tampering_threshold <= 100.0,
                "TAMPERING_THRESHOLD must be between 0 and 100")
         _check(0.0 <= self.tampering_review_threshold <= 100.0,
@@ -198,6 +229,7 @@ class Settings:
             "FACE_NOT_DETECTED", "FACE_LOW_CONFIDENCE", "FACE_MULTIPLE",
             "MRZ_CHECKSUM_FAILURE", "EXPIRED_DOCUMENT", "MRZ_NOT_DETECTED",
             "MRZ_LOW_CONFIDENCE", "IMAGE_QUALITY", "MODULE_ERROR", "UNKNOWN_MODULE",
+            "LIVENESS_FAILED", "LIVENESS_UNCERTAIN",
         }
         _check(required_factors.issubset(self.risk_weights.keys()),
                "Risk weight mapping is missing required factors")

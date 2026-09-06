@@ -4,7 +4,6 @@ import io
 from dataclasses import replace
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from app.config import Settings

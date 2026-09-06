@@ -49,6 +49,30 @@ class StubTampering:
         return dict(self._result)
 
 
+class StubLiveness:
+    """Deterministic liveness for API tests; defaults to LIVE."""
+
+    def __init__(self, result=None) -> None:
+        self._result = result or {
+            "is_live": True, "liveness_score": 0.9, "liveness_status": "LIVE",
+            "method": "stub", "model_used": None, "signals": {}, "reasons": [],
+            "explanation": "stubbed live result",
+        }
+
+    def analyze(self, image_bytes):
+        return dict(self._result)
+
+    def _not_checked(self, explanation):
+        return {
+            "is_live": False, "liveness_score": 0.0, "liveness_status": "NOT_CHECKED",
+            "method": "not_checked", "model_used": None, "signals": {},
+            "reasons": [], "explanation": explanation,
+        }
+
+    def readiness(self):
+        return {"liveness": True, "liveness_method": "stub"}
+
+
 @pytest.fixture
 def client():
     return TestClient(create_app())
@@ -253,12 +277,13 @@ def test_image_validation_limits_accept_valid_png(png_bytes):
 # Screening flow with injected modules
 # ---------------------------------------------------------------------------
 
-def _screen_app(face_backend=None, tampering_result=None):
+def _screen_app(face_backend=None, tampering_result=None, liveness_result=None):
     settings = create_app().state.settings
     manager = ModelManager(settings, backend=face_backend or DummyBackend([]))
     app = create_app(model_manager=manager)
     if tampering_result is not None:
         app.state.tampering = StubTampering(tampering_result)
+    app.state.liveness = StubLiveness(liveness_result)
     return app
 
 
@@ -356,9 +381,71 @@ def test_screen_ocr_fallback(monkeypatch):
     assert body["mrz"]["module_state"] == "PASS"
 
 
+def test_screen_response_includes_liveness():
+    backend = SequenceBackend([[_face()], [_face()]])
+    app = _screen_app(face_backend=backend,
+                      tampering_result={"status": "CLEAN", "score": 0.0})
+    response = _post_screen(app, live=True, data=_valid_mrz_form_data())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["liveness"]["liveness_status"] == "LIVE"
+    assert body["liveness"]["is_live"] is True
+    assert body["liveness"]["module_state"] == "PASS"
+    assert body["modules"]["liveness"]["liveness_status"] == "LIVE"
+
+
+def test_screen_liveness_spoof_forces_high_risk():
+    backend = SequenceBackend([[_face()], [_face()]])
+    spoof = {
+        "is_live": False, "liveness_score": 0.1, "liveness_status": "SPOOF_DETECTED",
+        "method": "heuristic", "model_used": None, "signals": {}, "reasons": [],
+        "explanation": "presentation attack",
+    }
+    app = _screen_app(
+        face_backend=backend,
+        tampering_result={"status": "CLEAN", "score": 0.0},
+        liveness_result=spoof,
+    )
+    response = _post_screen(app, live=True, data=_valid_mrz_form_data())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["risk_assessment"]["decision"] == "HIGH_RISK_REVIEW_REQUIRED"
+    assert body["risk_assessment"]["level"] == "HIGH_RISK"
+    assert body["risk_assessment"]["module_statuses"]["liveness"] == "FAIL"
+    assert any(f["factor"] == "LIVENESS_FAILED"
+               for f in body["risk_assessment"]["factors"])
+
+
+def test_screen_liveness_not_checked_shows_fail_safe():
+    backend = SequenceBackend([[_face()], [_face()]])
+    not_checked = {
+        "is_live": False, "liveness_score": 0.0, "liveness_status": "NOT_CHECKED",
+        "method": "not_checked", "model_used": None, "signals": {}, "reasons": [],
+        "explanation": "No live photo supplied.",
+    }
+    app = _screen_app(
+        face_backend=backend,
+        tampering_result={"status": "CLEAN", "score": 0.0},
+        liveness_result=not_checked,
+    )
+    response = _post_screen(app, live=True, data=_valid_mrz_form_data())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["liveness"]["liveness_status"] == "NOT_CHECKED"
+    assert body["risk_assessment"]["module_statuses"]["liveness"] == "NOT_AVAILABLE"
+    assert body["risk_assessment"]["decision"] != "CLEARED"
+
+
+def test_screen_invalid_document_type_returns_422():
+    app = _screen_app()
+    response = _post_screen(app, data={"document_type": "drivers_licence"})
+    assert response.status_code == 422
+
+
 def test_screen_internal_exception_returns_safe_500():
     app = _screen_app(face_backend=DummyBackend([]),
                       tampering_result={"status": "CLEAN", "score": 0.0})
+
     class _Boom:
         def evaluate(self, **kwargs):
             raise RuntimeError("secret-internal-detail")

@@ -48,6 +48,19 @@ class TamperingResult(BaseModel):
     module_state: str = "NOT_AVAILABLE"
 
 
+class LivenessResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    is_live: Optional[bool] = None
+    liveness_score: Optional[float] = None
+    liveness_status: str = "NOT_CHECKED"
+    method: str = "NOT_CHECKED"
+    model_used: Optional[str] = None
+    signals: dict[str, Any] = Field(default_factory=dict)
+    reasons: list[str] = Field(default_factory=list)
+    explanation: str = ""
+    module_state: str = "NOT_AVAILABLE"
+
+
 class RiskAssessment(BaseModel):
     score: int = Field(ge=0, le=100)
     status: str
@@ -71,6 +84,7 @@ class ScreenResponse(BaseModel):
     mrz: MRZValidationResult
     tampering_analysis: TamperingResult
     face_verification: FaceVerificationResult
+    liveness: LivenessResult = Field(default_factory=LivenessResult)
 
 
 class RegisterRequest(BaseModel):
@@ -120,6 +134,8 @@ class ScreeningRecordOut(BaseModel):
     face_similarity: Optional[float] = None
     tampering_status: Optional[str] = None
     tampering_score: Optional[float] = None
+    liveness_status: Optional[str] = None
+    liveness_score: Optional[float] = None
     mrz_source: str
     user_id: Optional[int]
     created_at: str

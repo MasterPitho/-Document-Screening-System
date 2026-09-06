@@ -83,6 +83,7 @@ def test_token_expiry_handles_naive_and_aware_datetimes():
     past_aware = utcnow() - datetime.timedelta(hours=1)
     assert _is_expired(past_aware)
 
+
 def test_register_and_login_flow():
     client = TestClient(_app())
     username = _unique("officer")

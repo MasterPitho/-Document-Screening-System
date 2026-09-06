@@ -3,8 +3,9 @@ Document Screening & Verification Engine - entry point.
 
 The implementation lives in the ``app`` package:
   - app/main.py            ASGI app factory + HTTP routes
-  - app/services/mrz.py    ICAO 9303 TD3 MRZ parsing + OCR extraction
+  - app/services/mrz.py    strategy-based document parsers (TD3/TD1) + OCR
   - app/services/face_recognition.py  ArcFace embedding face verification
+  - app/services/liveness.py          passive presentation attack screening
   - app/services/tampering.py         multi-signal image tampering analysis
   - app/services/risk_engine.py      deterministic, explainable risk scoring
 

@@ -71,6 +71,7 @@ from app.security.image_validation import ImageValidationLimits
 from app.services import mrz as mrz_mod
 from app.services import risk_engine as risk_mod
 from app.services.face_recognition import ModelManager
+from app.services.liveness import PassiveLivenessDetector
 from app.services.risk_engine import RiskEngine
 from app.services.tampering import TamperingDetector
 
@@ -95,6 +96,7 @@ def create_app(
     validation_limits = ImageValidationLimits(settings)
     risk_engine = RiskEngine(settings)
     tampering_detector = TamperingDetector(settings)
+    liveness_detector = PassiveLivenessDetector(settings)
 
     # Repositories own every database session.
     screening_repo = ScreeningRepository(database)
@@ -125,6 +127,7 @@ def create_app(
         # Model loading happens once at startup, never per request. A failure here
         # must not crash the API; readiness simply reports not_ready.
         model_manager.initialize_face_backend()
+        liveness_detector.initialize()  # fails safe to the heuristic fallback
         yield
 
     app = FastAPI(
@@ -147,6 +150,7 @@ def create_app(
     app.state.validation = validation_limits
     app.state.risk_engine = risk_engine
     app.state.tampering = tampering_detector
+    app.state.liveness = liveness_detector
     app.state.screening_repo = screening_repo
     app.state.audit_repo = audit_repo
     app.state.user_repo = user_repo
@@ -216,6 +220,7 @@ def _register_routes(app: FastAPI) -> None:
         live_photo: Optional[UploadFile] = File(None),
         mrz_line1: Optional[str] = Form(None),
         mrz_line2: Optional[str] = Form(None),
+        document_type: Optional[str] = Form(None),
     ) -> Dict[str, object]:
         state = request.app.state
         settings = state.settings
@@ -223,6 +228,7 @@ def _register_routes(app: FastAPI) -> None:
         tampering_detector = state.tampering
         risk_engine = state.risk_engine
         model_manager = state.model_manager
+        liveness_detector = state.liveness
         screening_repo = state.screening_repo
         audit_repo = state.audit_repo
 
@@ -234,6 +240,15 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=400,
                 detail="mrz_line1 and mrz_line2 must be provided together (both or neither).",
+            )
+
+        allowed_document_types = {"auto", "td3", "passport", "td1", "national_id", "aadhaar"}
+        document_type = (document_type or "auto").strip().lower() or "auto"
+        if document_type not in allowed_document_types:
+            raise HTTPException(
+                status_code=422,
+                detail="document_type must be one of: "
+                       "auto, td3/passport, td1/national_id/aadhaar.",
             )
 
         try:
@@ -274,7 +289,16 @@ def _register_routes(app: FastAPI) -> None:
             }
         face_result["module_state"] = risk_mod.face_module_state(face_result)
 
-        # 3. MRZ validation: submitted lines, otherwise OCR extraction.
+        # 3. Passive liveness (PAD) on the live capture; in-memory only.
+        try:
+            liveness_result = liveness_detector.analyze(live_bytes or b"")
+        except Exception:  # noqa: BLE001 - fail safe
+            liveness_result = liveness_detector._not_checked(
+                "Liveness analysis failed internally.")
+        liveness_result["module_state"] = risk_mod.liveness_module_state(liveness_result)
+
+        # 4. MRZ / document parse: submitted lines, otherwise the parser strategy.
+        mrz_result = {}
         if mrz_line1 and mrz_line2:
             mrz_data = mrz_mod.parse_td3_mrz(
                 mrz_line1, mrz_line2, year_pivot=settings.mrz_year_pivot)
@@ -287,16 +311,23 @@ def _register_routes(app: FastAPI) -> None:
                 "line1": redact_mrz(mrz_line1),
                 "line2": redact_mrz(mrz_line2),
                 "data": mrz_data,
+                "format": "TD3",
+                "document_type": "PASSPORT",
             }
         else:
-            mrz_result = mrz_mod.extract_mrz_from_image(doc_bytes, settings)
+            if document_type == "auto":
+                mrz_result = mrz_mod.extract_mrz_from_image(doc_bytes, settings)
+            else:
+                mrz_result = mrz_mod.extract_mrz_from_image(
+                    doc_bytes, settings, document_type=document_type)
         mrz_result["module_state"] = risk_mod.mrz_module_state(mrz_result)
 
-        # 4. Deterministic, explainable risk decision.
+        # 5. Deterministic, explainable risk decision.
         risk = risk_engine.evaluate(
             mrz_result=mrz_result,
             face_result=face_result,
             tamper_result=tamper_result,
+            liveness_result=liveness_result,
             image_quality=1.0,
         )
 
@@ -307,18 +338,21 @@ def _register_routes(app: FastAPI) -> None:
             "request_id": request_id,
             "processing_time_ms": processing_time_ms,
             "document": {
-                "format": "TD3" if mrz_result.get("detected") else "UNKNOWN",
+                "format": str(mrz_result.get("format", "UNKNOWN")),
                 "type": "PASSPORT" if mrz_result.get("detected") else "UNKNOWN",
+                "document_type": str(mrz_result.get("document_type", "UNKNOWN")),
             },
             "modules": {
                 "tampering_analysis": tamper_result,
                 "face_verification": face_result,
+                "liveness": liveness_result,
                 "mrz_validation": mrz_result,
             },
             "risk_assessment": risk,
             "mrz": mrz_result,
             "tampering_analysis": tamper_result,
             "face_verification": face_result,
+            "liveness": liveness_result,
         }
 
         # 5. Persist the screening: single transaction (commit on success,
@@ -335,6 +369,8 @@ def _register_routes(app: FastAPI) -> None:
                 face_similarity=face_result.get("similarity_score"),
                 tampering_status=str(tamper_result.get("status", "CLEAN")),
                 tampering_score=tamper_result.get("score"),
+                liveness_status=str(liveness_result.get("liveness_status", "NOT_CHECKED")),
+                liveness_score=liveness_result.get("liveness_score"),
                 risk_score=int(risk["score"]),
                 risk_level=str(risk["level"]),
                 decision=str(risk["decision"]),
@@ -514,6 +550,7 @@ def _register_routes(app: FastAPI) -> None:
         readiness = request.app.state.model_manager.readiness()
         modules: Dict[str, Any] = dict(readiness)
         modules["database"] = db_ok
+        modules.update(request.app.state.liveness.readiness())
         ready = db_ok and bool(readiness.get("face_recognition"))
         return JSONResponse(status_code=200 if ready else 503, content={
             "status": "ready" if ready else "not_ready",
@@ -547,6 +584,8 @@ def _as_screening_out(record: Screening) -> ScreeningRecordOut:
         face_similarity=record.face_similarity,
         tampering_status=record.tampering_status,
         tampering_score=record.tampering_score,
+        liveness_status=getattr(record, "liveness_status", None) or "NOT_CHECKED",
+        liveness_score=getattr(record, "liveness_score", None),
         mrz_source=record.mrz_source,
         user_id=record.user_id,
         created_at=created.isoformat() if created else "",

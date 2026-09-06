@@ -76,6 +76,8 @@ class Screening(Base):
     face_similarity = Column(Float, nullable=True)
     tampering_status = Column(String(40), nullable=False)
     tampering_score = Column(Float, nullable=True)
+    liveness_status = Column(String(40), nullable=False, default="NOT_CHECKED")
+    liveness_score = Column(Float, nullable=True)
 
     risk_score = Column(Integer, nullable=False)
     risk_level = Column(String(20), nullable=False)

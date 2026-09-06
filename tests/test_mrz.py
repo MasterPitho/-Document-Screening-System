@@ -2,8 +2,6 @@
 
 import io
 
-import pytest
-
 from app.config import Settings
 from app.services import mrz as mrz_mod
 from PIL import Image
@@ -17,7 +15,7 @@ def _settings() -> Settings:
     return Settings.from_env()
 
 
-def jpeg_bytes(width=800, height=500):
+def jpeg_bytes(width=500, height=800):
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), "white").save(buffer, format="JPEG")
     return buffer.getvalue()
