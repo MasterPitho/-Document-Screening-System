@@ -48,8 +48,22 @@ class TamperingResult(BaseModel):
     module_state: str = "NOT_AVAILABLE"
 
 
-class LivenessResult(BaseModel):
+class LivenessResultSchema(BaseModel):
+    """Passive liveness (PAD) result attached to a screening response.
+
+    ``status`` / ``score`` / ``checked`` / ``detail`` are the canonical
+    fields. The legacy ``liveness_*`` / ``is_live`` / ``module_state``
+    keys are retained for backward compatibility with existing clients and
+    are populated from the same service result (see ``from_service``).
+    """
+
     model_config = ConfigDict(extra="allow")
+
+    status: str = "NOT_CHECKED"
+    score: float = Field(0.0, ge=0.0, le=1.0)
+    checked: bool = False
+    detail: Optional[str] = None
+
     is_live: Optional[bool] = None
     liveness_score: Optional[float] = None
     liveness_status: str = "NOT_CHECKED"
@@ -59,6 +73,20 @@ class LivenessResult(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     explanation: str = ""
     module_state: str = "NOT_AVAILABLE"
+
+    @classmethod
+    def from_service(cls, result: dict[str, Any]) -> "LivenessResultSchema":
+        status = str(result.get("liveness_status", "NOT_CHECKED"))
+        return cls(
+            status=status,
+            score=float(result.get("liveness_score") or 0.0),
+            checked=status in {"LIVE", "SPOOF_DETECTED", "UNCERTAIN"},
+            detail=result.get("explanation"),
+            **result,
+        )
+
+
+LivenessResult = LivenessResultSchema  # backward-compatible alias
 
 
 class RiskAssessment(BaseModel):
@@ -84,7 +112,9 @@ class ScreenResponse(BaseModel):
     mrz: MRZValidationResult
     tampering_analysis: TamperingResult
     face_verification: FaceVerificationResult
-    liveness: LivenessResult = Field(default_factory=LivenessResult)
+    liveness: Optional[LivenessResultSchema] = Field(
+        default_factory=lambda: LivenessResultSchema(
+            status="NOT_CHECKED", score=0.0, checked=False))
 
 
 class RegisterRequest(BaseModel):

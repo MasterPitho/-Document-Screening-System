@@ -185,7 +185,7 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `RISK_IMAGE_QUALITY` | `10` | Reserved for image-quality signals. |
 | `RISK_MODULE_ERROR` | `25` | Applied when a module fails internally. |
 | `RISK_UNKNOWN_MODULE` | `15` | Applied when face verification is skipped (no live photo). |
-| `RISK_LIVENESS_FAILED` | `50` | Applied (and forces `HIGH_RISK_REVIEW_REQUIRED`) when liveness returns `SPOOF_DETECTED`. |
+| `RISK_LIVENESS_FAILED` | `35` | Applied (and forces `HIGH_RISK_REVIEW_REQUIRED`) when liveness returns `SPOOF_DETECTED`. |
 | `RISK_LIVENESS_UNCERTAIN` | `15` | Review penalty when liveness returns `UNCERTAIN`. |
 | `DATABASE_URL` | `sqlite:///./document_screening.db` | Any SQLAlchemy URL; PostgreSQL recommended (`postgresql+psycopg://user:pass@host:5432/db`). |
 | `DB_CONNECT_TIMEOUT` | `5` | Seconds allowed for a PostgreSQL connect (also used for the readiness probe). |

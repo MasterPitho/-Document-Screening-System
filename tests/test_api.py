@@ -391,6 +391,10 @@ def test_screen_response_includes_liveness():
     assert body["liveness"]["liveness_status"] == "LIVE"
     assert body["liveness"]["is_live"] is True
     assert body["liveness"]["module_state"] == "PASS"
+    assert body["liveness"]["status"] == "LIVE"
+    assert body["liveness"]["score"] == pytest.approx(0.9)
+    assert body["liveness"]["checked"] is True
+    assert body["liveness"]["detail"] == "stubbed live result"
     assert body["modules"]["liveness"]["liveness_status"] == "LIVE"
 
 

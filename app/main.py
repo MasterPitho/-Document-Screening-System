@@ -56,6 +56,7 @@ from app.db.repositories import (
 )
 from app.logging_setup import redact_mrz, set_up_logging
 from app.models.schemas import (
+    LivenessResultSchema,
     LoginRequest,
     LoginResponse,
     ReportSummary,
@@ -352,7 +353,7 @@ def _register_routes(app: FastAPI) -> None:
             "mrz": mrz_result,
             "tampering_analysis": tamper_result,
             "face_verification": face_result,
-            "liveness": liveness_result,
+            "liveness": LivenessResultSchema.from_service(liveness_result),
         }
 
         # 5. Persist the screening: single transaction (commit on success,

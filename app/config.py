@@ -119,7 +119,7 @@ class Settings:
             "IMAGE_QUALITY": _int_value("RISK_IMAGE_QUALITY", 10),
             "MODULE_ERROR": _int_value("RISK_MODULE_ERROR", 25),
             "UNKNOWN_MODULE": _int_value("RISK_UNKNOWN_MODULE", 15),
-            "LIVENESS_FAILED": _int_value("RISK_LIVENESS_FAILED", 50),
+            "LIVENESS_FAILED": _int_value("RISK_LIVENESS_FAILED", 35),
             "LIVENESS_UNCERTAIN": _int_value("RISK_LIVENESS_UNCERTAIN", 15),
         }
 
