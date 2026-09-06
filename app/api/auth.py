@@ -13,7 +13,7 @@ import hashlib
 import secrets
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from app.config import Settings
 from app.db.database import Database, utcnow_naive

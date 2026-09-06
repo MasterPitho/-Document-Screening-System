@@ -5,7 +5,7 @@ Shared request/response helpers for the API layer.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse

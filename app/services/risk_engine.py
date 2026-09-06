@@ -101,7 +101,9 @@ class RiskEngine:
             self.add_factor("TAMPERING_SUSPECTED",
                             "Multi-signal tampering analysis flagged possible manipulation.", factors, score)
         elif tamper_status in {"ERROR", "ANALYSIS_ERROR"}:
-            self.add_factor("MODULE_ERROR", "Tampering analysis failed and requires secondary inspection.", factors, score)
+            self.add_factor(
+                "MODULE_ERROR", "Tampering analysis failed and requires secondary inspection.",
+                factors, score)
         elif tamper_status == "INCONCLUSIVE":
             self.add_factor("TAMPERING_INCONCLUSIVE",
                             "Tampering analysis was inconclusive; secondary inspection recommended.", factors, score)
@@ -109,7 +111,9 @@ class RiskEngine:
         # ---- Face ----
         face_status = face_result.get("status")
         if face_status == "MISMATCH":
-            self.add_factor("FACE_MISMATCH", "Document and live face embeddings did not meet the threshold.", factors, score)
+            self.add_factor(
+                "FACE_MISMATCH", "Document and live face embeddings did not meet the threshold.",
+                factors, score)
         elif face_status == "MATCH":
             pass
         elif face_status == "SKIPPED_NO_LIVE_PHOTO":

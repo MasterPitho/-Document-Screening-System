@@ -70,7 +70,6 @@ from app.models.schemas import (
 from app.security.image_validation import ImageValidationLimits
 from app.services import mrz as mrz_mod
 from app.services import risk_engine as risk_mod
-from app.services import tampering as tamper_mod
 from app.services.face_recognition import ModelManager
 from app.services.risk_engine import RiskEngine
 from app.services.tampering import TamperingDetector
@@ -195,8 +194,11 @@ def create_app(
         request_id = getattr(request.state, "request_id", "")
         logger.error("unhandled_screening_error", path=request.url.path,
                      type=type(exc).__name__, request_id=request_id)
-        return structured_error(500, "Document screening failed unexpectedly.",
-                               request_id=request_id)
+        return structured_error(
+            500,
+            "Document screening failed unexpectedly.",
+            request_id=request_id,
+        )
 
     _register_routes(app)
     return app

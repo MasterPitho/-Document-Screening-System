@@ -29,6 +29,7 @@ from app.db.repositories import (
 __all__ = [
     "AuthToken",
     "AuditLog",
+    "AuditLogRepository",
     "AuthTokenRepository",
     "Base",
     "Database",

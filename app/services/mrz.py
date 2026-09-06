@@ -213,7 +213,7 @@ def extract_mrz_from_image(image_bytes: bytes, settings: Settings) -> dict[str, 
                     config=f"--psm {page_mode} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
                 )
                 candidates.extend(_ocr_candidates(ocr_text))
-    except Exception as error:
+    except Exception:
         return {
             "detected": False,
             "source": "ocr",
@@ -271,7 +271,11 @@ def extract_mrz_from_image(image_bytes: bytes, settings: Settings) -> dict[str, 
             "validation": {
                 "structure_valid": structurally_valid,
                 "checksums_valid": checks_valid,
-                "dates_valid": bool(isinstance(checks, dict) and checks.get("dob_valid") and checks.get("expiry_valid")),
+                "dates_valid": bool(
+                    isinstance(checks, dict)
+                    and checks.get("dob_valid")
+                    and checks.get("expiry_valid")
+                ),
             },
             "candidate_line1": line1,
             "candidate_line2": line2,

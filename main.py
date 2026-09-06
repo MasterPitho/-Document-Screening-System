@@ -17,7 +17,7 @@ decision, and a trained human officer remains the final decision maker.
 
 from __future__ import annotations
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.main import app, create_app
 from app.services.mrz import (
     calculate_icao_checksum,

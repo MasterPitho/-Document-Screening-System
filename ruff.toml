@@ -1,0 +1,10 @@
+line-length = 120
+
+target-version = "py311"
+
+# Real-code-bug rules only (mirrors the original
+# `flake8 --select=E9,F63,F7,F82 --max-line-length=120` gate).
+# Catches undefined names, unused imports/variables, unreachable code and
+# syntax errors without enforcing stylistic preferences.
+[lint]
+select = ["E9", "F"]
