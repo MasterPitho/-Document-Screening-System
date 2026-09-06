@@ -2,6 +2,7 @@
 
 import io
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -9,7 +10,9 @@ from app.config import Settings
 from app.services import mrz as mrz_mod
 from app.services.mrz import (
     DocumentParserRouter,
+    NationalIDTD1Parser,
     PARSER_ALIASES,
+    TD3PassportParser,
     parse_td1_national_id,
 )
 
@@ -170,3 +173,95 @@ def test_extract_td1_ocr_candidate_short_is_not_detected(monkeypatch):
     assert result["detected"] is False
     assert result["status"] == "NOT_DETECTED"
     assert result["format"] == "TD1"
+
+
+# ---------------------------------------------------------------------------
+# get_document_parser factory
+# ---------------------------------------------------------------------------
+
+def test_factory_explicit_types():
+    assert isinstance(mrz_mod.get_document_parser("passport"), TD3PassportParser)
+    assert isinstance(mrz_mod.get_document_parser("td3"), TD3PassportParser)
+    assert isinstance(mrz_mod.get_document_parser("national_id"), NationalIDTD1Parser)
+    assert isinstance(mrz_mod.get_document_parser("td1"), NationalIDTD1Parser)
+    assert isinstance(mrz_mod.get_document_parser("aadhaar"), NationalIDTD1Parser)
+
+
+def test_factory_auto_routes_by_image_and_defaults_to_passport():
+    portrait = np.asarray(Image.open(io.BytesIO(_jpeg(width=400, height=600))))
+    landscape = np.asarray(Image.open(io.BytesIO(_jpeg(width=400, height=250))))
+    assert mrz_mod.get_document_parser("auto", portrait).name == "passport"
+    assert mrz_mod.get_document_parser("auto", landscape).name == "national_id"
+    assert mrz_mod.get_document_parser("auto").name == "passport"
+    assert mrz_mod.get_document_parser().name == "passport"
+
+
+def test_factory_unknown_document_type_raises():
+    with pytest.raises(ValueError):
+        mrz_mod.get_document_parser("drivers_licence")
+
+
+def test_national_id_parser_alias_is_backward_compatible():
+    assert mrz_mod.NationalIDParser is NationalIDTD1Parser
+
+
+# ---------------------------------------------------------------------------
+# Parser parse() line-input fast paths
+# ---------------------------------------------------------------------------
+
+_TD3_LINE1 = "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<"
+_TD3_LINE2 = "L898902C36UTO7408122F3501014ZE184226B<<<<<16"
+
+
+def test_td3_parser_accepts_pre_extracted_lines():
+    parser = TD3PassportParser()
+    result = parser.parse(b"", _settings(), line1=_TD3_LINE1, line2=_TD3_LINE2)
+    assert result.detected is True
+    assert result.status == "VALID"
+    assert result.raw["source"] == "form"
+    assert result.data["checks"]["composite_valid"] is True
+
+
+def test_td3_parser_bad_checksum_lines_never_detected():
+    parser = TD3PassportParser()
+    bad = _TD3_LINE2[:8] + "4" + _TD3_LINE2[9:]
+    result = parser.parse(b"", _settings(), line1=_TD3_LINE1, line2=bad)
+    assert result.detected is False
+    assert result.status == "INVALID"
+
+
+def test_td3_parser_accepts_ndarray_image(monkeypatch):
+    monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: "")
+    parser = TD3PassportParser()
+    array = np.zeros((400, 200, 3), np.uint8)
+    result = parser.parse(array, _settings())
+    assert result.detected is False
+    assert result.status == "NOT_DETECTED"
+    assert result.document_type == "PASSPORT"
+
+
+def test_td3_parser_accepts_ndarray_image_with_lines():
+    parser = TD3PassportParser()
+    array = np.zeros((400, 200, 3), np.uint8)
+    result = parser.parse(array, _settings(), line1=_TD3_LINE1, line2=_TD3_LINE2)
+    assert result.detected is True
+    assert result.status == "VALID"
+
+
+def test_national_id_parser_accepts_pre_extracted_lines():
+    parser = NationalIDTD1Parser()
+    line1, line2, line3 = _td1_triple()
+    result = parser.parse(b"", _settings(), line1=line1, line2=line2, line3=line3)
+    assert result.detected is True
+    assert result.status == "VALID"
+    assert result.raw["source"] == "form"
+    assert result.data["checks"]["composite_valid"] is True
+
+
+def test_national_id_parser_bad_lines_never_falsely_valid():
+    parser = NationalIDTD1Parser()
+    line1, line2, line3 = _td1_triple()
+    bad = "X" + line2[1:]
+    result = parser.parse(b"", _settings(), line1=line1, line2=bad, line3=line3)
+    assert result.detected is False
+    assert result.status == "INVALID"

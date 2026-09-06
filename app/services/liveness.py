@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import cv2
@@ -38,14 +39,54 @@ from app.config import Settings
 logger = logging.getLogger("document_screening")
 
 # Liveness status vocabulary (stable contract for the API and risk engine).
+# ``SKIPPED`` means the check was intentionally not run (module disabled by
+# configuration); ``NOT_CHECKED`` is the fail-safe when no live capture is
+# available or the capture cannot be processed.
 LIVENESS_LIVE = "LIVE"
 LIVENESS_SPOOF = "SPOOF_DETECTED"
 LIVENESS_UNCERTAIN = "UNCERTAIN"
 LIVENESS_NOT_CHECKED = "NOT_CHECKED"
+LIVENESS_SKIPPED = "SKIPPED"
 
 _METHOD_ONNX = "onnx"
 _METHOD_HEURISTIC = "heuristic"
 _METHOD_NOT_CHECKED = "not_checked"
+
+
+@dataclass
+class LivenessResult:
+    """Typed heuristic presentation-attack verdict returned by ``analyze``.
+
+    This is an *additional triage signal*, not a certified biometric PAD
+    verdict: it only estimates whether the capture looks like a common
+    printout/screen replay. ``score`` is a deterministic fusion in
+    ``[0, 1]`` (higher = more live-like) and is always finite (NaN/inf are
+    forced to the spoof-bias value). ``status`` is one of ``LIVE``,
+    ``SPOOF_DETECTED``, ``UNCERTAIN``, ``NOT_CHECKED`` or ``SKIPPED``.
+    ``detail`` is a human-readable explanation.
+    """
+
+    is_live: bool = False
+    score: float = 0.0
+    status: str = LIVENESS_NOT_CHECKED
+    detail: str = ""
+    method: str = _METHOD_NOT_CHECKED
+    model_used: Optional[str] = None
+    signals: dict[str, Any] = field(default_factory=dict)
+    reasons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Legacy dict shape consumed by the risk engine, persistence and API."""
+        return {
+            "is_live": self.is_live,
+            "liveness_score": round(float(self.score), 4),
+            "liveness_status": self.status,
+            "method": self.method,
+            "model_used": self.model_used,
+            "signals": dict(self.signals or {}),
+            "reasons": list(self.reasons or []),
+            "explanation": self.detail,
+        }
 
 
 def _decode_bgr(image_bytes: bytes) -> Optional[np.ndarray]:
@@ -238,11 +279,12 @@ class PassiveLivenessDetector:
     """Top-level PAD orchestrator: ONNX primary, OpenCV heuristic fallback.
 
     All analysis is in-memory; no file is ever written. ``analyze`` returns a
-    stable dict consumed by the API and the risk engine:
-
-    ``is_live``, ``liveness_score`` (0..1), ``liveness_status``
-    (``LIVE``/``SPOOF_DETECTED``/``UNCERTAIN``/``NOT_CHECKED``), ``method``,
-    ``model_used``, per-signal ``signals`` and a plain-text ``explanation``.
+    ``LivenessResult`` dataclass (see ``LivenessResult.to_dict`` for the
+    legacy dict consumed by the API and the risk engine): ``status`` is
+    ``LIVE``/``SPOOF_DETECTED``/``UNCERTAIN``/``NOT_CHECKED``/``SKIPPED``,
+    ``score`` is the clamped finite ``[0, 1]`` fusion, and ``detail`` is the
+    human-readable explanation. This is a heuristic triage signal, not a
+    certified biometric PAD verdict.
     """
 
     def __init__(
@@ -273,9 +315,11 @@ class PassiveLivenessDetector:
             "liveness_method": _METHOD_ONNX if self.is_ready() else _METHOD_HEURISTIC,
         }
 
-    def analyze(self, image_bytes: bytes) -> dict[str, Any]:
+    def analyze(self, image_bytes: bytes) -> LivenessResult:
         if not self.settings.liveness_enabled:
-            return self._not_checked("Liveness screening is disabled by configuration.")
+            return self._not_checked(
+                "Liveness screening is disabled by configuration.",
+                status=LIVENESS_SKIPPED)
         if not image_bytes:
             return self._not_checked("No live photo supplied.")
 
@@ -316,8 +360,12 @@ class PassiveLivenessDetector:
         model_used: Optional[str] = None,
         signals: Optional[dict[str, float]] = None,
         reasons: Optional[list[str]] = None,
-    ) -> dict[str, Any]:
-        score = max(0.0, min(1.0, float(score)))
+    ) -> LivenessResult:
+        score = float(score)
+        # NaN/inf can never be a valid liveness score; fail safe to spoof-bias.
+        if not math.isfinite(score):
+            score = 0.0
+        score = max(0.0, min(1.0, score))
         spoof = self.settings.liveness_spoof_threshold
         uncertain = self.settings.liveness_uncertain_threshold
         if score <= spoof:
@@ -333,26 +381,23 @@ class PassiveLivenessDetector:
             LIVENESS_UNCERTAIN: "Liveness could not be determined confidently; "
                                 "apply the configured review penalty.",
         }[status]
-        return {
-            "is_live": status == LIVENESS_LIVE,
-            "liveness_score": round(score, 4),
-            "liveness_status": status,
-            "method": method,
-            "model_used": model_used,
-            "signals": signals or {},
-            "reasons": reasons or [],
-            "explanation": explanation,
-        }
+        return LivenessResult(
+            is_live=status == LIVENESS_LIVE,
+            score=score,
+            status=status,
+            detail=explanation,
+            method=method,
+            model_used=model_used,
+            signals=signals or {},
+            reasons=reasons or [],
+        )
 
     @staticmethod
-    def _not_checked(explanation: str) -> dict[str, Any]:
-        return {
-            "is_live": False,
-            "liveness_score": 0.0,
-            "liveness_status": LIVENESS_NOT_CHECKED,
-            "method": _METHOD_NOT_CHECKED,
-            "model_used": None,
-            "signals": {},
-            "reasons": [],
-            "explanation": explanation,
-        }
+    def _not_checked(explanation: str, status: str = LIVENESS_NOT_CHECKED) -> LivenessResult:
+        return LivenessResult(
+            is_live=False,
+            score=0.0,
+            status=status,
+            detail=explanation,
+            method=_METHOD_NOT_CHECKED,
+        )

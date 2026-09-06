@@ -16,6 +16,7 @@ from app.services.face_recognition import (
     ModelManager,
 )
 from app.services import mrz as mrz_mod
+from app.services.liveness import LivenessResult
 
 VALID_LINE1 = "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<"
 UNEXPIRED_LINE2 = "L898902C36UTO7408122F3501014ZE184226B<<<<<16"
@@ -50,7 +51,11 @@ class StubTampering:
 
 
 class StubLiveness:
-    """Deterministic liveness for API tests; defaults to LIVE."""
+    """Deterministic liveness for API tests; defaults to LIVE.
+
+    Mirrors the real ``PassiveLivenessDetector`` contract by returning
+    ``LivenessResult`` objects.
+    """
 
     def __init__(self, result=None) -> None:
         self._result = result or {
@@ -59,15 +64,26 @@ class StubLiveness:
             "explanation": "stubbed live result",
         }
 
-    def analyze(self, image_bytes):
-        return dict(self._result)
+    def analyze(self, image_bytes) -> LivenessResult:
+        if not image_bytes:
+            return self._not_checked("No live photo supplied.")
+        raw = dict(self._result)
+        return LivenessResult(
+            is_live=bool(raw.get("is_live", False)),
+            score=float(raw.get("liveness_score", 0.0)),
+            status=str(raw.get("liveness_status", "NOT_CHECKED")),
+            detail=str(raw.get("explanation", "")),
+            method=str(raw.get("method", "not_checked")),
+            model_used=raw.get("model_used"),
+            signals=dict(raw.get("signals", {})),
+            reasons=list(raw.get("reasons", [])),
+        )
 
-    def _not_checked(self, explanation):
-        return {
-            "is_live": False, "liveness_score": 0.0, "liveness_status": "NOT_CHECKED",
-            "method": "not_checked", "model_used": None, "signals": {},
-            "reasons": [], "explanation": explanation,
-        }
+    def _not_checked(self, explanation) -> LivenessResult:
+        return LivenessResult(
+            is_live=False, score=0.0, status="NOT_CHECKED", detail=explanation,
+            method="not_checked",
+        )
 
     def readiness(self):
         return {"liveness": True, "liveness_method": "stub"}
@@ -438,6 +454,52 @@ def test_screen_liveness_not_checked_shows_fail_safe():
     assert body["liveness"]["liveness_status"] == "NOT_CHECKED"
     assert body["risk_assessment"]["module_statuses"]["liveness"] == "NOT_AVAILABLE"
     assert body["risk_assessment"]["decision"] != "CLEARED"
+
+
+def test_screen_without_live_photo_skips_liveness():
+    backend = SequenceBackend([[_face()]])
+    app = _screen_app(face_backend=backend,
+                      tampering_result={"status": "CLEAN", "score": 0.0})
+    response = _post_screen(app, live=False, data=_valid_mrz_form_data())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["liveness"]["liveness_status"] == "NOT_CHECKED"
+    assert body["liveness"]["checked"] is False
+    assert body["risk_assessment"]["module_statuses"]["liveness"] == "NOT_AVAILABLE"
+
+
+def test_screen_document_type_passport_works():
+    backend = SequenceBackend([[_face()], [_face()]])
+    app = _screen_app(face_backend=backend,
+                      tampering_result={"status": "CLEAN", "score": 0.0})
+    response = _post_screen(app, data=_valid_mrz_form_data()
+                            | {"document_type": "passport"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document"]["format"] == "TD3"
+    assert body["document"]["document_type"] == "PASSPORT"
+
+
+class RaisingLiveness:
+    """Liveness stub that fails internally to exercise the fail-safe path."""
+
+    def analyze(self, image_bytes):
+        raise ValueError("boom")
+
+    def _not_checked(self, explanation) -> LivenessResult:
+        return LivenessResult(status="NOT_CHECKED", detail=explanation)
+
+
+def test_screen_liveness_analysis_exception_fails_safe():
+    backend = SequenceBackend([[_face()], [_face()]])
+    app = _screen_app(face_backend=backend,
+                      tampering_result={"status": "CLEAN", "score": 0.0})
+    app.state.liveness = RaisingLiveness()
+    response = _post_screen(app, live=True, data=_valid_mrz_form_data())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["liveness"]["liveness_status"] == "NOT_CHECKED"
+    assert body["risk_assessment"]["module_statuses"]["liveness"] == "NOT_AVAILABLE"
 
 
 def test_screen_invalid_document_type_returns_422():

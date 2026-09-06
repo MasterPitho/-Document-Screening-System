@@ -292,10 +292,11 @@ def _register_routes(app: FastAPI) -> None:
 
         # 3. Passive liveness (PAD) on the live capture; in-memory only.
         try:
-            liveness_result = liveness_detector.analyze(live_bytes or b"")
+            liveness_detection = liveness_detector.analyze(live_bytes or b"")
         except Exception:  # noqa: BLE001 - fail safe
-            liveness_result = liveness_detector._not_checked(
+            liveness_detection = liveness_detector._not_checked(
                 "Liveness analysis failed internally.")
+        liveness_result = liveness_detection.to_dict()
         liveness_result["module_state"] = risk_mod.liveness_module_state(liveness_result)
 
         # 4. MRZ / document parse: submitted lines, otherwise the parser strategy.

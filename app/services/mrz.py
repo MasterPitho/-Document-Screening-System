@@ -9,9 +9,11 @@ Architecture
 
 - ``TD3PassportParser`` - the classic ICAO 9303 TD3 passport parser /
   Tesseract OCR candidate pipeline (unchanged, rule-based behaviour).
-- ``NationalIDParser`` - structural TD1 (3x30) parser stub and QR payload
-  presence placeholder (ID-1 cards such as national IDs / Aadhaar-style
-  documents). Format-parsing depth is a roadmap item, not a production claim.
+- ``NationalIDTD1Parser`` - structural TD1 (3x30) parser with checksum/date
+  validation and a QR payload presence placeholder (ID-1 cards such as
+  national IDs / Aadhaar-style documents). Format-parsing depth is a roadmap
+  item, not a production claim. An alias ``NationalIDParser`` is kept for
+  backward compatibility.
 
 Aspect-ratio heuristics
 -----------------------
@@ -297,6 +299,13 @@ def _decode_bgr(image_bytes: bytes) -> Optional[np.ndarray]:
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
+def _encode_bgr(image_bgr: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(".jpg", image_bgr)
+    if not ok:
+        raise ValueError("Unable to encode an ndarray for in-memory parsing.")
+    return encoded.tobytes()
+
+
 @dataclass
 class DocumentParseResult:
     detected: bool
@@ -321,8 +330,21 @@ class BaseDocumentParser(ABC):
         """Structural gate used by the router for ``auto`` selection."""
 
     @abstractmethod
-    def parse(self, image_bytes: bytes, settings: Settings, **kwargs: Any) -> DocumentParseResult:
-        """Parse in-memory image bytes into a DocumentParseResult."""
+    def parse(
+        self,
+        image: Any,
+        settings: Optional[Settings] = None,
+        line1: Optional[str] = None,
+        line2: Optional[str] = None,
+        line3: Optional[str] = None,
+        **kwargs: Any,
+    ) -> DocumentParseResult:
+        """Parse an in-memory document image (or pre-extracted MRZ lines).
+
+        ``image`` accepts image bytes (historical contract) or an OpenCV BGR
+        ``np.ndarray``. When ``line1``/``line2``/``line3`` are supplied they
+        are validated directly instead of running OCR.
+        """
 
 
 class TD3PassportParser(BaseDocumentParser):
@@ -343,8 +365,21 @@ class TD3PassportParser(BaseDocumentParser):
             return False
         return (width / height) < PASSPORT_MIN_RATIO
 
-    def parse(self, image_bytes: bytes, settings: Settings, **kwargs: Any) -> DocumentParseResult:
+    def parse(
+        self,
+        image: Any,
+        settings: Optional[Settings] = None,
+        line1: Optional[str] = None,
+        line2: Optional[str] = None,
+        line3: Optional[str] = None,
+        **kwargs: Any,
+    ) -> DocumentParseResult:
         """Extract a structurally valid TD3 MRZ without inventing missing characters."""
+        if settings is None:
+            settings = Settings.from_env()
+        if line1 is not None and line2 is not None:
+            return self._from_lines(line1, line2, settings)
+        image_bytes: bytes = image if isinstance(image, bytes) else _encode_bgr(image)
         year_pivot = settings.mrz_year_pivot
         confidence_threshold = settings.mrz_confidence_threshold
         try:
@@ -464,6 +499,30 @@ class TD3PassportParser(BaseDocumentParser):
         }
         return self._result(raw)
 
+    def _from_lines(self, line1: str, line2: str, settings: Settings) -> DocumentParseResult:
+        """Validate two pre-extracted TD3 lines (form/telegram path, no OCR)."""
+        parsed = parse_td3_mrz(line1, line2, year_pivot=settings.mrz_year_pivot)
+        checks = parsed.get("checks")
+        checks_valid = bool(isinstance(checks, dict) and all(checks.values()))
+        status = str(parsed.get("status", "MALFORMED"))
+        raw = {
+            "detected": bool(checks_valid),
+            "source": "form",
+            "status": status,
+            "confidence": 1.0 if checks_valid else 0.5,
+            "line1": line1,
+            "line2": line2,
+            "data": parsed,
+            "validation": {
+                "structure_valid": bool(status not in {"MALFORMED", "INVALID"}),
+                "checksums_valid": checks_valid,
+                "dates_valid": bool(isinstance(checks, dict)
+                                    and checks.get("dob_valid")
+                                    and checks.get("expiry_valid")),
+            },
+        }
+        return self._result(raw)
+
     def _result(self, raw: dict[str, Any]) -> DocumentParseResult:
         result = dict(raw)
         result["format"] = self.format
@@ -480,10 +539,13 @@ class TD3PassportParser(BaseDocumentParser):
         )
 
 
-class NationalIDParser(BaseDocumentParser):
-    """Structural TD1 (3x30) national ID parser stub with QR presence check.
+class NationalIDTD1Parser(BaseDocumentParser):
+    """Structural TD1 (3x30) national ID parser with QR presence check.
 
-    The QR-code payload is decoded (when present) purely for presence/flags;
+    The TD1 structure, ICAO checksums and dates are validated like the
+    passport path; nothing is ever marked ``VALID`` unless every check
+    passes, so the parser never falsely reports successful validation. The
+    QR-code payload is decoded (when present) purely for presence/flags;
     the payload itself is never echoed back (privacy contract).
     """
 
@@ -499,7 +561,20 @@ class NationalIDParser(BaseDocumentParser):
             return False
         return (width / height) >= PASSPORT_MIN_RATIO
 
-    def parse(self, image_bytes: bytes, settings: Settings, **kwargs: Any) -> DocumentParseResult:
+    def parse(
+        self,
+        image: Any,
+        settings: Optional[Settings] = None,
+        line1: Optional[str] = None,
+        line2: Optional[str] = None,
+        line3: Optional[str] = None,
+        **kwargs: Any,
+    ) -> DocumentParseResult:
+        if settings is None:
+            settings = Settings.from_env()
+        if line1 is not None and line2 is not None and line3 is not None:
+            return self._from_lines(line1, line2, line3, settings)
+        image_bytes: bytes = image if isinstance(image, bytes) else _encode_bgr(image)
         year_pivot = settings.mrz_year_pivot
         qr_present, qr_error = self._qr_probe(image_bytes)
 
@@ -596,6 +671,31 @@ class NationalIDParser(BaseDocumentParser):
         except Exception:  # noqa: BLE001 - QR probing must be non-fatal
             return False, "QR probe failed internally."
 
+    def _from_lines(self, line1: str, line2: str, line3: str, settings: Settings) -> DocumentParseResult:
+        """Validate three pre-extracted TD1 lines (form/telegram path, no OCR)."""
+        parsed = parse_td1_national_id(line1, line2, line3, year_pivot=settings.mrz_year_pivot)
+        checks = parsed.get("checks")
+        checks_valid = bool(isinstance(checks, dict) and all(checks.values()))
+        status = str(parsed.get("status", "MALFORMED"))
+        raw = {
+            "detected": bool(checks_valid),
+            "source": "form",
+            "status": status,
+            "confidence": 1.0 if checks_valid else 0.5,
+            "line1": line1,
+            "line2": line2,
+            "line3": line3,
+            "data": parsed,
+            "validation": {
+                "structure_valid": bool(status not in {"MALFORMED", "INVALID"}),
+                "checksums_valid": checks_valid,
+                "dates_valid": bool(isinstance(checks, dict)
+                                    and checks.get("dob_valid")
+                                    and checks.get("expiry_valid")),
+            },
+        }
+        return self._result(raw, settings)
+
     def _result(self, raw: dict[str, Any], settings: Settings) -> DocumentParseResult:
         result = dict(raw)
         result["format"] = self.format
@@ -612,6 +712,9 @@ class NationalIDParser(BaseDocumentParser):
         )
 
 
+NationalIDParser = NationalIDTD1Parser  # backward-compatible alias
+
+
 class DocumentParserRouter:
     """Selects a parser by explicit ``document_type`` or by aspect ratio."""
 
@@ -619,7 +722,7 @@ class DocumentParserRouter:
         self.passport_min_ratio = passport_min_ratio
         self._parsers: dict[str, BaseDocumentParser] = {
             "passport": TD3PassportParser(),
-            "national_id": NationalIDParser(),
+            "national_id": NationalIDTD1Parser(),
         }
 
     def resolve(self, document_type: str) -> str:
@@ -633,17 +736,22 @@ class DocumentParserRouter:
                 "td3/passport, td1/national_id/aadhaar.")
         return key
 
-    def select(self, image_bytes: bytes, document_type: str = "auto") -> BaseDocumentParser:
+    def parser_for(self, document_type: str = "auto",
+                   image_bgr: Optional[np.ndarray] = None) -> BaseDocumentParser:
+        """Resolve a parser from an explicit type or ``auto`` aspect ratio."""
         key = self.resolve(document_type)
         if key != "auto":
             return self._parsers[key]
+        if image_bgr is not None and image_bgr.size \
+                and image_bgr.shape[0] > 0 and image_bgr.shape[1] > 0:
+            for parser in self._parsers.values():
+                if parser.can_parse(image_bgr):
+                    return parser
+        return self._parsers["passport"]  # default to the classic path
+
+    def select(self, image_bytes: bytes, document_type: str = "auto") -> BaseDocumentParser:
         image_bgr = _decode_bgr(image_bytes)
-        if image_bgr is None or image_bgr.size == 0:
-            return self._parsers["passport"]  # default to the classic path
-        for parser in self._parsers.values():
-            if parser.can_parse(image_bgr):
-                return parser
-        return self._parsers["passport"]
+        return self.parser_for(document_type, image_bgr)
 
     def parse(
         self,
@@ -659,6 +767,21 @@ class DocumentParserRouter:
 _router: DocumentParserRouter = DocumentParserRouter()
 
 
+def get_document_parser(
+    doc_type: str = "auto",
+    image: Optional[np.ndarray] = None,
+) -> BaseDocumentParser:
+    """Strategy factory for ``POST /api/v1/screen`` document routing.
+
+    - ``passport`` / ``td3`` -> ``TD3PassportParser``
+    - ``national_id`` / ``td1`` / ``aadhaar`` -> ``NationalIDTD1Parser``
+    - ``auto`` -> aspect-ratio detection when an ``image`` is supplied,
+      otherwise the classic passport parser
+    - any other ``doc_type`` -> ``ValueError`` (explicit validation error)
+    """
+    return _router.parser_for(doc_type, image)
+
+
 def extract_mrz_from_image(
     image_bytes: bytes,
     settings: Settings,
@@ -670,5 +793,6 @@ def extract_mrz_from_image(
     for any parser. Keeps the historical two-argument call contract valid:
     ``extract_mrz_from_image(image_bytes, settings)`` routes automatically.
     """
-    result = _router.parse(image_bytes, settings, document_type=document_type)
+    parser = get_document_parser(document_type, _decode_bgr(image_bytes))
+    result = parser.parse(image_bytes, settings)
     return result.raw
