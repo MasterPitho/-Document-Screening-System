@@ -46,6 +46,19 @@ def is_postgres_url(url: str) -> bool:
     return url.startswith("postgresql") or url.startswith("postgres+")
 
 
+def normalize_database_url(url: str) -> str:
+    """Use the installed Psycopg 3 driver for conventional PostgreSQL URLs.
+
+    Managed providers such as Render expose PostgreSQL URLs as
+    ``postgresql://...``. SQLAlchemy 2.0 interprets that form as the legacy
+    ``psycopg2`` driver, which is deliberately not installed by this project.
+    Keep explicit dialect URLs unchanged and upgrade only the generic form.
+    """
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url.removeprefix("postgresql://")
+    return url
+
+
 class Database:
     """Owns the SQLAlchemy engine and session factory for one app instance."""
 
@@ -56,12 +69,12 @@ class Database:
         connect_timeout_s: int = 5,
         pool_options: Optional[dict[str, Any]] = None,
     ) -> None:
-        self.url = url
+        self.url = normalize_database_url(url)
         options: dict[str, Any] = {
             "echo": False,
             "future": True,
         }
-        if is_postgres_url(url):
+        if is_postgres_url(self.url):
             # Survive PostgreSQL restarts under the compose stack.
             options.setdefault("pool_pre_ping", True)
             options.setdefault("pool_recycle", 1800)
@@ -74,7 +87,7 @@ class Database:
             # SQLite is per-thread; the FastAPI test client runs in threads.
             options["connect_args"] = {"check_same_thread": False}
 
-        self.engine: Engine = create_engine(url, **options)
+        self.engine: Engine = create_engine(self.url, **options)
         self._session_factory: sessionmaker[Session] = sessionmaker(
             bind=self.engine, autoflush=False, autocommit=False, future=True,
         )

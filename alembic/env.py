@@ -12,6 +12,7 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, pool
 
+from app.db.database import normalize_database_url
 from app.db.models import Base
 
 config = context.config
@@ -23,6 +24,7 @@ _DATABASE_URL = (
     or config.get_main_option("sqlalchemy.url", "")
     or "sqlite:///./document_screening.db"
 )
+_DATABASE_URL = normalize_database_url(_DATABASE_URL)
 
 
 def run_migrations_offline() -> None:
