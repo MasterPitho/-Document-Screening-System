@@ -571,6 +571,11 @@ def _register_routes(app: FastAPI) -> None:
         record = _resolve_screening(request.app.state.screening_repo, item_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Screening record not found.")
+        if _current_user.role == "officer" and record.user_id is not None and record.user_id != _current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Officers may only access their own screenings.",
+            )
         return _as_screening_out(record)
 
     @app.get("/api/v1/screenings/{item_id}/factors", response_model=list[ScreeningFactorOut])
@@ -583,6 +588,11 @@ def _register_routes(app: FastAPI) -> None:
         record = _resolve_screening(repo, item_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Screening record not found.")
+        if _current_user.role == "officer" and record.user_id is not None and record.user_id != _current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Officers may only access their own screenings.",
+            )
         return [
             ScreeningFactorOut(
                 id=f.id, factor_name=f.factor_name, severity=f.severity,
@@ -602,6 +612,11 @@ def _register_routes(app: FastAPI) -> None:
         record = _resolve_screening(repo, item_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Screening record not found.")
+        if _current_user.role == "officer" and record.user_id is not None and record.user_id != _current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Officers may only modify their own screenings.",
+            )
 
         decision_clean = payload.decision.strip().upper()
         allowed_decisions = {
@@ -622,11 +637,12 @@ def _register_routes(app: FastAPI) -> None:
             status_color = "RED"
 
         officer_id = _current_user.id if _current_user else None
+        resolved_notes = (payload.notes or payload.review_notes or "").strip() or None
         updated = repo.update_decision(
             screening_id=record.id,
             decision=decision_clean,
             status_color=status_color,
-            notes=payload.notes.strip() if payload.notes else None,
+            notes=resolved_notes,
             officer_id=officer_id,
         )
         if updated is None:

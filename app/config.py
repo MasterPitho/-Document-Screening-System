@@ -236,6 +236,10 @@ class Settings:
         _check(self.db_connect_timeout >= 0, "DB_CONNECT_TIMEOUT cannot be negative")
         _check(self.db_connect_retries >= 0, "DB_CONNECT_RETRIES cannot be negative")
         _check(self.db_retry_delay >= 0, "DB_RETRY_DELAY cannot be negative")
+        _check(self.screening_rate_limit_per_minute > 0,
+               "SCREENING_RATE_LIMIT_PER_MINUTE must be greater than zero")
+        _check(self.max_concurrent_screenings > 0,
+               "MAX_CONCURRENT_SCREENINGS must be greater than zero")
 
         required_factors = {
             "TAMPERING_SUSPECTED", "TAMPERING_INCONCLUSIVE", "FACE_MISMATCH",

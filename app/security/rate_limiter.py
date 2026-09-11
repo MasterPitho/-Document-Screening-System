@@ -17,7 +17,7 @@ class ResourceLimiter:
     def __init__(self, settings: Settings) -> None:
         self.max_concurrent = max(1, settings.max_concurrent_screenings)
         self.rate_limit_per_minute = max(1, settings.screening_rate_limit_per_minute)
-        self._semaphore = asyncio.Semaphore(self.max_concurrent)
+        self._semaphore = asyncio.BoundedSemaphore(self.max_concurrent)
         self._user_requests: dict[str, collections.deque[float]] = collections.defaultdict(collections.deque)
         self._lock = asyncio.Lock()
 

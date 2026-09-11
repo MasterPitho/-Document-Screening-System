@@ -264,3 +264,122 @@ def test_dashboard_endpoints_require_authentication(app_and_client):
     assert client.get("/api/v1/watchlists").status_code == 401
 
 
+def test_officer_cannot_access_or_modify_other_officer_screening(app_and_client):
+    """Officer Alice must not be able to view, view factors, or modify Officer Bob's screening."""
+    app, client = app_and_client
+    user_repo = app.state.user_repo
+    repo = app.state.screening_repo
+
+    from app.api.auth import _hash_password
+
+    u_alice = user_repo.create(
+        username="officer_alice_idor",
+        email="alice_idor@agency.gov",
+        full_name="Officer Alice IDOR",
+        role="officer",
+        password_hash=_hash_password("Password123!"),
+    )
+    u_bob = user_repo.create(
+        username="officer_bob_idor",
+        email="bob_idor@agency.gov",
+        full_name="Officer Bob IDOR",
+        role="officer",
+        password_hash=_hash_password("Password123!"),
+    )
+    u_carol = user_repo.create(
+        username="supervisor_carol_idor",
+        email="carol_idor@agency.gov",
+        full_name="Supervisor Carol IDOR",
+        role="supervisor",
+        password_hash=_hash_password("Password123!"),
+    )
+
+    rec_bob = repo.create(
+        request_id="bob-doc-idor",
+        processing_time_ms=50,
+        document_type="PASSPORT",
+        mrz_status="VALID",
+        face_status="MATCH",
+        face_similarity=0.9,
+        tampering_status="CLEAN",
+        tampering_score=0.1,
+        risk_score=10,
+        risk_level="LOW_RISK",
+        decision="CLEARED",
+        status_color="GREEN",
+        module_states={},
+        factor_list=[],
+        mrz_source="ocr",
+        user_id=u_bob.id,
+    )
+    rec_alice = repo.create(
+        request_id="alice-doc-idor",
+        processing_time_ms=50,
+        document_type="PASSPORT",
+        mrz_status="VALID",
+        face_status="MATCH",
+        face_similarity=0.9,
+        tampering_status="CLEAN",
+        tampering_score=0.1,
+        risk_score=10,
+        risk_level="LOW_RISK",
+        decision="CLEARED",
+        status_color="GREEN",
+        module_states={},
+        factor_list=[],
+        mrz_source="ocr",
+        user_id=u_alice.id,
+    )
+
+    t_alice = client.post("/api/v1/auth/login", json={"username": "officer_alice_idor", "password": "Password123!"}).json()["token"]
+    t_carol = client.post("/api/v1/auth/login", json={"username": "supervisor_carol_idor", "password": "Password123!"}).json()["token"]
+
+    # 1. Alice accessing Bob's record directly -> 403 Forbidden
+    resp = client.get(f"/api/v1/screenings/{rec_bob.id}", headers={"Authorization": f"Bearer {t_alice}"})
+    assert resp.status_code == 403
+    body = resp.json()
+    error_msg = body.get("error", {}).get("message") or body.get("detail", "")
+    assert "Forbidden" in error_msg
+
+    # 2. Alice accessing Bob's factors directly -> 403 Forbidden
+    resp_factors = client.get(f"/api/v1/screenings/{rec_bob.id}/factors", headers={"Authorization": f"Bearer {t_alice}"})
+    assert resp_factors.status_code == 403
+
+    # 3. Alice attempting to alter Bob's screening decision -> 403 Forbidden
+    resp_patch = client.patch(
+        f"/api/v1/screenings/{rec_bob.id}/decision",
+        json={"decision": "REJECTED", "notes": "Tampered by Alice"},
+        headers={"Authorization": f"Bearer {t_alice}"},
+    )
+    assert resp_patch.status_code == 403
+
+    # 4. Alice CAN access and patch her own record
+    resp_own = client.get(f"/api/v1/screenings/{rec_alice.id}", headers={"Authorization": f"Bearer {t_alice}"})
+    assert resp_own.status_code == 200
+
+    resp_own_factors = client.get(f"/api/v1/screenings/{rec_alice.id}/factors", headers={"Authorization": f"Bearer {t_alice}"})
+    assert resp_own_factors.status_code == 200
+
+    resp_own_patch = client.patch(
+        f"/api/v1/screenings/{rec_alice.id}/decision",
+        json={"decision": "REVIEW", "review_notes": "Officer review note via review_notes field"},
+        headers={"Authorization": f"Bearer {t_alice}"},
+    )
+    assert resp_own_patch.status_code == 200
+    assert resp_own_patch.json()["decision"] == "REVIEW"
+    assert resp_own_patch.json()["notes"] == "Officer review note via review_notes field"
+
+    # 5. Supervisor Carol CAN access and patch Bob's record
+    resp_sup_get = client.get(f"/api/v1/screenings/{rec_bob.id}", headers={"Authorization": f"Bearer {t_carol}"})
+    assert resp_sup_get.status_code == 200
+
+    resp_sup_patch = client.patch(
+        f"/api/v1/screenings/{rec_bob.id}/decision",
+        json={"decision": "CLEARED", "notes": "Supervisor approved"},
+        headers={"Authorization": f"Bearer {t_carol}"},
+    )
+    assert resp_sup_patch.status_code == 200
+    assert resp_sup_patch.json()["decision"] == "CLEARED"
+
+
+
