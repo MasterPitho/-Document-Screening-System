@@ -76,9 +76,6 @@ class ScreeningRepository:
         factor_list: Sequence[dict[str, Any]],
         mrz_source: str,
         user_id: Optional[int] = None,
-        applicant_name: Optional[str] = None,
-        document_number: Optional[str] = None,
-        country_code: Optional[str] = None,
         notes: Optional[str] = None,
         created_at: Optional[datetime.datetime] = None,
         audit_message: str = "",
@@ -112,9 +109,6 @@ class ScreeningRepository:
                 factors=[dict(f) for f in factor_list],
                 mrz_source=mrz_source,
                 user_id=user_id,
-                applicant_name=applicant_name,
-                document_number=document_number,
-                country_code=country_code,
                 notes=notes,
             )
             for factor in factor_list:
@@ -426,12 +420,12 @@ class ScreeningRepository:
             rows = session.execute(stmt.limit(limit)).scalars().all()
             notifications = []
             for s in rows:
-                doc_str = s.document_number or (s.request_id[:8] if s.request_id else "UNKNOWN")
+                doc_str = s.request_id[:8] if s.request_id else "UNKNOWN"
                 is_read = s.decision in {"CLEARED", "REVIEW"}
                 notifications.append({
                     "id": f"notif-{s.id}",
                     "type": "HIGH_RISK_ALERT",
-                    "message": f"High risk detected on document {doc_str}",
+                    "message": f"High risk detected on screening {doc_str}",
                     "created_at": s.created_at.isoformat() if s.created_at else "",
                     "read": is_read,
                 })

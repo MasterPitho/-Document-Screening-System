@@ -32,15 +32,6 @@ def _face():
     )
 
 
-@pytest.fixture
-def app_and_client(tmp_path, monkeypatch):
-    db_path = f"sqlite:///{(tmp_path / 'test_dash.db').as_posix()}"
-    monkeypatch.setenv("DATABASE_URL", db_path)
-    settings = Settings.from_env()
-    manager = ModelManager(settings, backend=DummyBackend([_face()]))
-    app = create_app(settings=settings, model_manager=manager)
-    client = TestClient(app)
-    return app, client
 
 
 def _auth_token(client):
@@ -79,23 +70,23 @@ def test_screen_populates_applicant_identity(app_and_client):
     body = resp.json()
     screening_id = body["persistence"]["screening_id"]
 
-    # Verify via GET /api/v1/screenings/{item_id}
+    # Verify via GET /api/v1/screenings/{item_id} - zero PII persisted
     detail = client.get(f"/api/v1/screenings/{screening_id}", headers=headers)
     assert detail.status_code == 200
     rec = detail.json()
-    assert rec["applicant_name"] == "ANNA MARIA ERIKSSON"
-    assert rec["document_number"] == "L898902C3"
-    assert rec["country_code"] == "UTO"
+    assert "applicant_name" not in rec
+    assert "document_number" not in rec
+    assert "country_code" not in rec
     assert rec["notes"] is None
 
-    # Verify via GET /api/v1/screenings list
+    # Verify via GET /api/v1/screenings list - zero PII in list
     listing = client.get("/api/v1/screenings", headers=headers)
     assert listing.status_code == 200
     assert listing.json()["total"] >= 1
     found = next(r for r in listing.json()["records"] if r["id"] == screening_id)
-    assert found["applicant_name"] == "ANNA MARIA ERIKSSON"
-    assert found["document_number"] == "L898902C3"
-    assert found["country_code"] == "UTO"
+    assert "applicant_name" not in found
+    assert "document_number" not in found
+    assert "country_code" not in found
 
 
 def test_screen_without_mrz_stores_none_identities(app_and_client):
@@ -115,9 +106,9 @@ def test_screen_without_mrz_stores_none_identities(app_and_client):
     detail = client.get(f"/api/v1/screenings/{screening_id}", headers=headers)
     assert detail.status_code == 200
     rec = detail.json()
-    assert rec["applicant_name"] is None
-    assert rec["document_number"] is None
-    assert rec["country_code"] is None
+    assert "applicant_name" not in rec
+    assert "document_number" not in rec
+    assert "country_code" not in rec
 
 
 # --------------------------------------------------------------------------- #
@@ -274,7 +265,6 @@ def test_notifications_and_watchlists(app_and_client):
         module_states={"mrz": "PASS", "face": "PASS", "tampering": "PASS"},
         factor_list=[],
         mrz_source="ocr",
-        document_number="A0183948",
     )
 
     # Notifications endpoint
@@ -285,7 +275,7 @@ def test_notifications_and_watchlists(app_and_client):
     assert len(notifs) >= 1
     first = notifs[0]
     assert first["type"] == "HIGH_RISK_ALERT"
-    assert "A0183948" in first["message"]
+    assert "High risk detected on screening high-ris" in first["message"]
     assert "created_at" in first
     assert "read" in first
 

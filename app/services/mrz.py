@@ -49,7 +49,8 @@ PARSER_ALIASES: dict[str, str] = {
     "passport": "passport",
     "td1": "national_id",
     "national_id": "national_id",
-    "aadhaar": "national_id",
+    "aadhaar": "aadhaar",
+    "pan": "pan",
 }
 
 
@@ -720,10 +721,23 @@ class DocumentParserRouter:
 
     def __init__(self, passport_min_ratio: float = PASSPORT_MIN_RATIO) -> None:
         self.passport_min_ratio = passport_min_ratio
-        self._parsers: dict[str, BaseDocumentParser] = {
-            "passport": TD3PassportParser(),
-            "national_id": NationalIDTD1Parser(),
-        }
+        self._parsers: dict[str, BaseDocumentParser] = {}
+
+    def _ensure_parser(self, key: str) -> BaseDocumentParser:
+        if key not in self._parsers:
+            if key == "passport":
+                self._parsers["passport"] = TD3PassportParser()
+            elif key == "national_id":
+                self._parsers["national_id"] = NationalIDTD1Parser()
+            elif key == "aadhaar":
+                from app.services.aadhaar import AadhaarDocumentParser
+                self._parsers["aadhaar"] = AadhaarDocumentParser()
+            elif key == "pan":
+                from app.services.pan import PANDocumentParser
+                self._parsers["pan"] = PANDocumentParser()
+            else:
+                raise ValueError(f"Unknown parser key: {key}")
+        return self._parsers[key]
 
     def resolve(self, document_type: str) -> str:
         normalized = (document_type or "auto").strip().lower()
@@ -733,7 +747,7 @@ class DocumentParserRouter:
         if key is None:
             raise ValueError(
                 "document_type must be one of: auto, "
-                "td3/passport, td1/national_id/aadhaar.")
+                "td3/passport, td1/national_id, aadhaar, pan.")
         return key
 
     def parser_for(self, document_type: str = "auto",
@@ -741,13 +755,14 @@ class DocumentParserRouter:
         """Resolve a parser from an explicit type or ``auto`` aspect ratio."""
         key = self.resolve(document_type)
         if key != "auto":
-            return self._parsers[key]
+            return self._ensure_parser(key)
         if image_bgr is not None and image_bgr.size \
                 and image_bgr.shape[0] > 0 and image_bgr.shape[1] > 0:
-            for parser in self._parsers.values():
-                if parser.can_parse(image_bgr):
-                    return parser
-        return self._parsers["passport"]  # default to the classic path
+            for k in ["passport", "national_id"]:
+                p = self._ensure_parser(k)
+                if p.can_parse(image_bgr):
+                    return p
+        return self._ensure_parser("passport")  # default to the classic path
 
     def select(self, image_bytes: bytes, document_type: str = "auto") -> BaseDocumentParser:
         image_bgr = _decode_bgr(image_bytes)
@@ -795,4 +810,7 @@ def extract_mrz_from_image(
     """
     parser = get_document_parser(document_type, _decode_bgr(image_bytes))
     result = parser.parse(image_bytes, settings)
-    return result.raw
+    raw = dict(result.raw)
+    raw.setdefault("document_type", result.document_type)
+    raw.setdefault("format", result.format)
+    return raw

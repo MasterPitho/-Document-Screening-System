@@ -90,9 +90,6 @@ class Screening(Base):
     mrz_source = Column(String(10), nullable=False, default="none")
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
-    applicant_name = Column(String(120), nullable=True)
-    document_number = Column(String(64), nullable=True)
-    country_code = Column(String(10), nullable=True)
     notes = Column(Text, nullable=True)
 
     factor_rows = relationship(
@@ -114,7 +111,6 @@ class Screening(Base):
         Index("ix_screenings_created_at", created_at),
         Index("ix_screenings_decision", decision),
         Index("ix_screenings_risk_level", risk_level),
-        Index("ix_screenings_document_number", document_number),
     )
 
 

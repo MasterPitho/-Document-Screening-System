@@ -37,6 +37,7 @@ from app.api.auth import (
     bootstrap_admin,
     extract_optional_user,
     get_current_user,
+    require_role,
     verify_password,
     _generate_token,
     _hash_token,
@@ -80,6 +81,7 @@ from app.services.face_recognition import ModelManager
 from app.services.liveness import PassiveLivenessDetector
 from app.services.risk_engine import RiskEngine
 from app.services.tampering import TamperingDetector
+from app.services.cross_signal import CrossSignalEvaluator
 
 import datetime
 
@@ -162,12 +164,16 @@ def create_app(
     app.state.user_repo = user_repo
     app.state.token_repo = token_repo
 
+    cors_origins = list(settings.cors_origins) if settings.cors_origins else ["*"]
+    allow_credentials = settings.cors_allow_credentials and "*" not in cors_origins
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
     )
 
     # ---- Request ID middleware: validate/echo X-Request-ID -----------------
@@ -248,13 +254,13 @@ def _register_routes(app: FastAPI) -> None:
                 detail="mrz_line1 and mrz_line2 must be provided together (both or neither).",
             )
 
-        allowed_document_types = {"auto", "td3", "passport", "td1", "national_id", "aadhaar"}
+        allowed_document_types = {"auto", "td3", "passport", "td1", "national_id", "aadhaar", "pan"}
         document_type = (document_type or "auto").strip().lower() or "auto"
         if document_type not in allowed_document_types:
             raise HTTPException(
                 status_code=422,
                 detail="document_type must be one of: "
-                       "auto, td3/passport, td1/national_id/aadhaar.",
+                       "auto, td3/passport, td1/national_id/aadhaar, pan.",
             )
 
         try:
@@ -329,12 +335,22 @@ def _register_routes(app: FastAPI) -> None:
                     doc_bytes, settings, document_type=document_type)
         mrz_result["module_state"] = risk_mod.mrz_module_state(mrz_result)
 
+        # 4b. Cross-signal consistency evaluation
+        cross_signal_evaluator = CrossSignalEvaluator()
+        cross_result = cross_signal_evaluator.evaluate(
+            requested_type=document_type,
+            doc_result=mrz_result,
+            tamper_result=tamper_result,
+            face_result=face_result,
+        )
+
         # 5. Deterministic, explainable risk decision.
         risk = risk_engine.evaluate(
             mrz_result=mrz_result,
             face_result=face_result,
             tamper_result=tamper_result,
             liveness_result=liveness_result,
+            cross_signal_result=cross_result,
             image_quality=1.0,
         )
 
@@ -346,7 +362,7 @@ def _register_routes(app: FastAPI) -> None:
             "processing_time_ms": processing_time_ms,
             "document": {
                 "format": str(mrz_result.get("format", "UNKNOWN")),
-                "type": "PASSPORT" if mrz_result.get("detected") else "UNKNOWN",
+                "type": str(mrz_result.get("document_type") or ("PASSPORT" if mrz_result.get("detected") else "UNKNOWN")),
                 "document_type": str(mrz_result.get("document_type", "UNKNOWN")),
             },
             "modules": {
@@ -354,6 +370,10 @@ def _register_routes(app: FastAPI) -> None:
                 "face_verification": face_result,
                 "liveness": liveness_result,
                 "mrz_validation": mrz_result,
+                "cross_signal": {
+                    "is_consistent": cross_result.is_consistent,
+                    "conflicts": cross_result.conflicts,
+                },
             },
             "risk_assessment": risk,
             "mrz": mrz_result,
@@ -364,12 +384,7 @@ def _register_routes(app: FastAPI) -> None:
 
         # 5. Persist the screening: single transaction (commit on success,
         #    rollback on failure). Raw images, embeddings, MRZ text, and
-        #    passport numbers are never stored.
-        mrz_data = mrz_result.get("data") if isinstance(mrz_result.get("data"), dict) else {}
-        applicant_name = mrz_data.get("full_name") or None
-        document_number = mrz_data.get("passport_number") or mrz_data.get("document_number") or None
-        country_code = mrz_data.get("issuing_country") or mrz_data.get("nationality") or None
-
+        #    identifying numbers/names are never stored.
         try:
             current_user = extract_optional_user(request)
             screening = screening_repo.create(
@@ -391,9 +406,6 @@ def _register_routes(app: FastAPI) -> None:
                 factor_list=risk["factors"],
                 mrz_source=str(mrz_result.get("source", "none")),
                 user_id=current_user.id if current_user else None,
-                applicant_name=applicant_name,
-                document_number=document_number,
-                country_code=country_code,
             )
             response["persistence"] = {"status": "stored", "screening_id": screening.id}
         except DuplicateRequestError:
@@ -435,7 +447,7 @@ def _register_routes(app: FastAPI) -> None:
                 username=username,
                 email=email,
                 full_name=payload.full_name.strip(),
-                role="officer",
+                role=payload.role.strip().lower() if payload.role else "officer",
                 officer_id=payload.officer_id.strip() if payload.officer_id else None,
                 password_hash=_hash_password(payload.password),
             )
@@ -534,7 +546,7 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         item_id: str,
         payload: DecisionUpdateRequest,
-        _current_user=Depends(extract_optional_user),
+        _current_user=Depends(require_role("officer", "supervisor")),
     ) -> ScreeningRecordOut:
         repo: ScreeningRepository = request.app.state.screening_repo
         record = _resolve_screening(repo, item_id)
@@ -710,9 +722,6 @@ def _as_screening_out(record: Screening) -> ScreeningRecordOut:
         liveness_score=getattr(record, "liveness_score", None),
         mrz_source=record.mrz_source,
         user_id=record.user_id,
-        applicant_name=getattr(record, "applicant_name", None),
-        document_number=getattr(record, "document_number", None),
-        country_code=getattr(record, "country_code", None),
         notes=getattr(record, "notes", None),
         created_at=created.isoformat() if created else "",
     )

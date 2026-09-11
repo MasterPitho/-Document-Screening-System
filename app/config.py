@@ -47,6 +47,7 @@ def _bool_value(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Settings:
     cors_origins: list[str]
+    cors_allow_credentials: bool
     api_env: str
     log_level: str
 
@@ -121,6 +122,9 @@ class Settings:
             "UNKNOWN_MODULE": _int_value("RISK_UNKNOWN_MODULE", 15),
             "LIVENESS_FAILED": _int_value("RISK_LIVENESS_FAILED", 35),
             "LIVENESS_UNCERTAIN": _int_value("RISK_LIVENESS_UNCERTAIN", 15),
+            "DOCUMENT_TYPE_MISMATCH": _int_value("RISK_DOCUMENT_TYPE_MISMATCH", 30),
+            "QR_OCR_CONFLICT": _int_value("RISK_QR_OCR_CONFLICT", 35),
+            "SUSPICIOUS_FIELD_TAMPERING": _int_value("RISK_SUSPICIOUS_FIELD_TAMPERING", 25),
         }
 
         return cls(
@@ -128,6 +132,7 @@ class Settings:
                 "CORS_ORIGINS", "ALLOWED_ORIGINS",
                 "http://localhost:3000,http://localhost:5173",
             ),
+            cors_allow_credentials=_bool_value("CORS_ALLOW_CREDENTIALS", True),
             api_env=os.getenv("API_ENV", "development").strip() or "development",
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             max_image_bytes=_int_value("MAX_IMAGE_BYTES", default_size_mb * 1024 * 1024),
@@ -230,9 +235,16 @@ class Settings:
             "MRZ_CHECKSUM_FAILURE", "EXPIRED_DOCUMENT", "MRZ_NOT_DETECTED",
             "MRZ_LOW_CONFIDENCE", "IMAGE_QUALITY", "MODULE_ERROR", "UNKNOWN_MODULE",
             "LIVENESS_FAILED", "LIVENESS_UNCERTAIN",
+            "DOCUMENT_TYPE_MISMATCH", "QR_OCR_CONFLICT", "SUSPICIOUS_FIELD_TAMPERING",
         }
         _check(required_factors.issubset(self.risk_weights.keys()),
                "Risk weight mapping is missing required factors")
+
+        if self.api_env == "production":
+            _check(
+                not ("*" in self.cors_origins and self.cors_allow_credentials),
+                "Wildcard origin '*' with credentials is not permitted in production."
+            )
 
 
 def get_settings() -> Settings:

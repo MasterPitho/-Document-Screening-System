@@ -121,6 +121,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     email: str = Field(min_length=5, max_length=255)
     full_name: str = Field(default="", max_length=120)
+    role: str = Field(default="officer", max_length=20)
     officer_id: Optional[str] = Field(default=None, max_length=50)
     password: str = Field(min_length=8, max_length=128)
 
@@ -169,10 +170,7 @@ class ScreeningRecordOut(BaseModel):
     liveness_status: Optional[str] = None
     liveness_score: Optional[float] = None
     mrz_source: str
-    user_id: Optional[int]
-    applicant_name: Optional[str] = None
-    document_number: Optional[str] = None
-    country_code: Optional[str] = None
+    user_id: Optional[int] = None
     notes: Optional[str] = None
     created_at: str
 

@@ -90,7 +90,7 @@ def test_td1_expiry_uses_pivot_year():
 
 
 def test_parser_aliases_cover_api_document_types():
-    assert set(PARSER_ALIASES) == {"td3", "passport", "td1", "national_id", "aadhaar"}
+    assert set(PARSER_ALIASES) == {"td3", "passport", "td1", "national_id", "aadhaar", "pan"}
 
 
 def test_router_selects_passport_by_portrait_ratio():
@@ -112,7 +112,8 @@ def test_router_respects_explicit_document_type():
     assert router.select(arbitrary, document_type="passport").name == "passport"
     assert router.select(arbitrary, document_type="td1").name == "national_id"
     assert router.select(arbitrary, document_type="national_id").name == "national_id"
-    assert router.select(arbitrary, document_type="aadhaar").name == "national_id"
+    assert router.select(arbitrary, document_type="aadhaar").name == "aadhaar"
+    assert router.select(arbitrary, document_type="pan").name == "pan"
 
 
 def test_router_rejects_unknown_document_type():
@@ -180,11 +181,15 @@ def test_extract_td1_ocr_candidate_short_is_not_detected(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_factory_explicit_types():
+    from app.services.aadhaar import AadhaarDocumentParser
+    from app.services.pan import PANDocumentParser
+
     assert isinstance(mrz_mod.get_document_parser("passport"), TD3PassportParser)
     assert isinstance(mrz_mod.get_document_parser("td3"), TD3PassportParser)
     assert isinstance(mrz_mod.get_document_parser("national_id"), NationalIDTD1Parser)
     assert isinstance(mrz_mod.get_document_parser("td1"), NationalIDTD1Parser)
-    assert isinstance(mrz_mod.get_document_parser("aadhaar"), NationalIDTD1Parser)
+    assert isinstance(mrz_mod.get_document_parser("aadhaar"), AadhaarDocumentParser)
+    assert isinstance(mrz_mod.get_document_parser("pan"), PANDocumentParser)
 
 
 def test_factory_auto_routes_by_image_and_defaults_to_passport():

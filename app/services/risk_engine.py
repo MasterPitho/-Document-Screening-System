@@ -109,6 +109,7 @@ class RiskEngine:
         tamper_result: Dict[str, Any],
         image_quality: float = 1.0,
         liveness_result: Optional[Dict[str, Any]] = None,
+        cross_signal_result: Optional[Any] = None,
     ) -> Dict[str, Any]:
         score = [0]
         factors: List[Dict[str, Any]] = []
@@ -184,6 +185,17 @@ class RiskEngine:
                     "LIVENESS_UNCERTAIN",
                     "Liveness check was inconclusive; review penalty applied.",
                     factors, score)
+
+        # ---- Cross-Signal Consistency ----
+        if cross_signal_result is not None:
+            cs_factors = getattr(cross_signal_result, "factors", None)
+            if cs_factors is None and isinstance(cross_signal_result, dict):
+                cs_factors = cross_signal_result.get("factors", [])
+            for csf in cs_factors or []:
+                fname = csf.get("factor")
+                fdetail = csf.get("detail", "")
+                if fname:
+                    self.add_factor(fname, fdetail, factors, score)
 
         module_statuses = {
             "mrz": mrz_module_state(mrz_result),

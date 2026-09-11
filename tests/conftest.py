@@ -35,3 +35,24 @@ def png_bytes():
         return buffer.getvalue()
 
     return _make
+
+
+@pytest.fixture
+def app_and_client(tmp_path, monkeypatch):
+    import numpy as np
+    from app.config import Settings
+    from app.main import create_app
+    from app.services.face_recognition import DummyBackend, FaceDetectionResult, ModelManager
+    from starlette.testclient import TestClient
+
+    db_path = f"sqlite:///{(tmp_path / 'test_shared.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", db_path)
+    settings = Settings.from_env()
+    dummy_face = FaceDetectionResult(
+        bbox=[10, 20, 110, 140], score=0.9, landmarks=None,
+        embedding=np.ones((512,), dtype=np.float32),
+    )
+    manager = ModelManager(settings, backend=DummyBackend([dummy_face]))
+    app = create_app(settings=settings, model_manager=manager)
+    client = TestClient(app)
+    return app, client

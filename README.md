@@ -26,12 +26,13 @@ Screen a physical identity document through **multi-modal triage** — a machine
 - **Transparent deterministic weighting.** Every activated risk factor has an explicit, documented weight; unknown factors raise an error rather than being silently assigned a weight. The score is a bounded, reproducible sum (0–100), not a learned probability.
 - **Strict in-memory execution.** No upload, crop, frame, embedding, or MRZ string touches disk (except the privacy-preserving audit *metadata* row described below). Component singletons are created at app startup, never per request.
 
-### 1d. Multi-Document Expansion Roadmap
+### 1d. Multi-Document Engine Architecture
 
-- **Phase 1 (current):** ICAO 9303 **TD3 passports** — two 44-character MRZ lines, OCR candidate filtering, 7-3-1 checksums, pivot-year date semantics. Implemented behind a strategy interface (see `app/services/mrz.py`).
-- **Phase 2 (blueprint):** `NationalIDParser` stub with **TD1 (three 30-character lines)** structural validation and a **QR payload extraction placeholder** for Aadhaar-style secure QR codes — architected now, validation depth to be completed.
-- **Phase 3 (blueprint):** **Aadhaar QR/XML** parsing (secure QR envelope → decrypted XML fields) and **PAN OCR layout parsing** (fixed 128×128 card line layout), both fitted into the same `DocumentParserRouter`.
-- **Router contract:** the parser is selected either by an explicit `document_type` request parameter (`auto | td3 | passport | td1 | national_id | aadhaar`) or, in `auto` mode, by the document image aspect ratio (a passport data page is portrait, ratio `< 1.45`; an ID-1 card is landscape, ratio `>= 1.45`). Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through the same `BaseDocumentParser` interface, so the pipeline never changes when a new document type is added.
+- **TD3 Passports (ICAO 9303):** Two 44-character MRZ lines, OCR candidate filtering, 7-3-1 check digits, impossible-date & pivot-year expiry validation.
+- **TD1 National Identity Cards (ICAO 9303):** Three 30-character MRZ lines, check digits, and structural layout.
+- **Aadhaar Cards (UIDAI):** Dedicated layout anchor detection, Verhoeff checksum algorithm on 12-digit UID numbers, masked identity representation (`XXXX-XXXX-1234`), and embedded QR payload parsing.
+- **PAN Cards (Income Tax Dept of India):** Dedicated 10-character alphanumeric regex (`[A-Z]{5}[0-9]{4}[A-Z]`), 4th character entity type validation (`P`=Individual, `C`=Company, `H`=HUF, `F`=Firm, `A`=AOP, etc.), masked identity (`ABCPXXXX4F`), and anchor recognition.
+- **Router Contract:** Parser is selected either by explicit `document_type` (`auto | td3 | passport | td1 | national_id | aadhaar | pan`) or, in `auto` mode, by document aspect ratio and layout anchors. Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through `BaseDocumentParser`.
 
 ### 1e. Security Boundaries
 
@@ -41,40 +42,58 @@ Screen a physical identity document through **multi-modal triage** — a machine
 
 ## Current Scope
 
-- TD3 passport MRZ: two 44-character lines, ICAO 9303 7-3-1 checks for document number, date of birth, expiry, and composite data, plus impossible-date and pivot-year expiry validation.
-- Automatic MRZ OCR via Tesseract when the caller omits the MRZ form fields.
-- Multi-signal image-forensics analysis: ELA, JPEG compression, noise, edge, lightweight copy-move (duplicate-region), and metadata presence. These are heuristic indicators, not a forgery classifier.
-- Face verification with InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime). Detection is SCRFD (InsightFace `FaceAnalysis`), faces are aligned, and the L2-normalized ArcFace embeddings of the document face and an optional live photo are compared by cosine similarity; **exactly one** face per image is accepted (extra/missing/low-confidence faces are reported, never guessed). The model is downloaded once at startup (or baked into the Docker image).
-- Passive liveness screening (`app/services/liveness.py`): MiniFASNet-style ONNX anti-spoofing wrapper when `LIVENESS_MODEL_PATH` is configured, with an OpenCV heuristic fallback (FFT high-frequency power, Laplacian blur, colour-space histograms, moiré detection). Output is `LIVE` / `SPOOF_DETECTED` / `UNCERTAIN` / `NOT_CHECKED` (plus `SKIPPED` when the module is disabled), fully in memory.
-- Explainable risk score: weighted factors with explicit, documented weights. Weights are heuristic prototype values, not calibrated probabilities.
+- **Multi-Document Support:** TD3 passports, TD1 ID cards, Aadhaar cards (with Verhoeff checksum & masked UID), and PAN cards (with 4th-char entity validation & masked PAN).
+- **Embedded QR Code Analysis:** OpenCV-based QR detection with adaptive preprocessing, payload classification (`AADHAAR_XML`, `SECURE_AADHAAR_NUMERIC`, `GENERIC_URL`, `GENERIC_TEXT`), and privacy-safe masked summaries.
+- **Cross-Signal Consistency Engine:** Validates requested document type vs detected document structure, cross-checks QR payload vs OCR metadata, and detects spatial tampering overlapping identity text / MRZ regions.
+- **Multi-Signal Image Forensics:** ELA, JPEG compression, noise, edge, lightweight copy-move (duplicate-region), and metadata presence.
+- **Face Verification & Liveness:** InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime), passive presentation-attack detection (MiniFASNet ONNX or OpenCV texture/frequency fallback).
+- **Deterministic Risk Engine:** Weighted factors with explicit, documented weights. Weights are heuristic prototype values, not calibrated probabilities.
+- **Zero-PII Storage:** Fully compliant database and audit schema with no raw MRZ lines, document numbers, applicant names, biometric vectors, or image persistence.
 
 ## Processing Pipeline
 
 ```text
 Upload validation (byte size, MIME, extension, signature, pixel count, dimensions)
-    -> Document parser router (aspect ratio / document_type)
-         -> TD3 passport: MRZ form input, or Tesseract OCR candidate pipeline
-         -> National ID (stub): TD1 3-line structure + QR payload placeholder
-    -> Tamper signals: ELA + compression + noise + edges + copy-move + metadata
-    -> Face verification: InsightFace ArcFace embeddings (doc vs live photo)
-    -> Passive liveness (PAD): ONNX anti-spoofing or OpenCV texture/frequency fallback
-    -> Deterministic, explainable risk engine (weights, module gates, liveness gate)
-    -> PostgreSQL-backed privacy-preserving audit record (SQLAlchemy + Alembic)
+    -> QR Code Analysis (OpenCV detector + adaptive preprocessing + payload classification)
+    -> Document Parser Router (aspect ratio / layout anchors / document_type)
+         -> TD3 Passport: MRZ form input or Tesseract OCR candidate pipeline
+         -> TD1 National ID: 3-line MRZ structure + check digits
+         -> Aadhaar Card: UIDAI layout anchors + Verhoeff checksum + masked UID
+         -> PAN Card: Income Tax layout anchors + 10-char entity regex + masked PAN
+    -> Image Forensics: ELA + compression + noise + edges + copy-move + metadata
+    -> Face Verification: InsightFace ArcFace embeddings (doc photo vs live photo)
+    -> Passive Liveness (PAD): ONNX anti-spoofing or OpenCV texture/frequency fallback
+    -> Cross-Signal Consistency Engine:
+         - Document type requested vs detected layout
+         - QR payload vs OCR identity consistency
+         - Spatial tampering overlap with identity / MRZ regions
+    -> Deterministic, Explainable Risk Engine (weights, module gates, liveness gate)
+    -> Role-Based Access Control (RBAC: officer, supervisor, admin)
+    -> PostgreSQL-backed Zero-PII Audit Record (SQLAlchemy + Alembic migrations)
 ```
 
 ## Architecture and Package Layout
 
 `app/` is the FastAPI application package. `create_app()` builds the app, its configuration, and every runtime singleton, then exposes them through `request.app.state` — components are never created at module import time (which keeps the test suite DB-independent and import-safe).
 
-- `app/main.py` — app factory and lifespan (retrying database bring-up, admin bootstrap from env vars, face-model load), plus all HTTP routes: `GET /health`, `GET /ready`, `POST /api/v1/screen`, `POST /api/v1/auth/register|login|logout`, `GET /api/v1/auth/me`, `GET /api/v1/screenings` (list + filters), `GET /api/v1/screenings/{id_or_request_id}`, `GET /api/v1/screenings/{id_or_request_id}/factors`, `GET /api/v1/stats`, `GET /api/v1/report/summary`.
+- `app/main.py` — app factory and lifespan (retrying database bring-up, admin bootstrap from env vars, face-model load), plus all HTTP routes: `GET /health`, `GET /ready`, `POST /api/v1/screen`, `POST /api/v1/auth/register|login|logout`, `GET /api/v1/auth/me`, `GET /api/v1/screenings` (list + filters), `GET /api/v1/screenings/{id_or_request_id}`, `PATCH /api/v1/screenings/{item_id}/decision` (RBAC-protected officer/supervisor override), `GET /api/v1/screenings/{id_or_request_id}/factors`, `GET /api/v1/stats`, `GET /api/v1/report/summary`.
 - `app/config.py` — pydantic `Settings` loaded from the environment plus the cached `get_settings()`.
 - `app/db/` — persistence layer:
   - `database.py` — the `Database` engine/session factory (`build_database`), `ping()` readiness probe, retrying `DatabaseConnector`, UTC clock helpers, and the `get_db` FastAPI dependency.
-  - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`) with indexes.
+  - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`) with indexes and strict zero-PII storage.
   - `repositories.py` — the only module that opens sessions; one short-lived session per operation (`ScreeningRepository`, `AuditLogRepository`, `UserRepository`, `AuthTokenRepository`).
-- `app/api/` — `auth.py` (register/login/logout/me, bearer-token helpers, `extract_optional_user` for anonymous screenings) and `helpers.py` (shared request utilities).
-- `app/services/` — `mrz.py` (strategy-based document parsers: `BaseDocumentParser`, `TD3PassportParser`, `NationalIDParser` stub, `DocumentParserRouter`, plus backward-compatible OCR), `tampering.py` (multi-signal forensics), `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests), `liveness.py` (passive ONNX + OpenCV presentation-attack screening), `risk_engine.py` (weighted deterministic scoring).
-- `app/security/image_validation.py` — upload hardening (byte size, MIME, extension, signature, pixel count, dimensions).
+- `app/api/` — `auth.py` (register/login/logout/me, `require_role` RBAC dependency, bearer-token helpers, `extract_optional_user` for anonymous screenings) and `helpers.py` (shared request utilities).
+- `app/services/` — 
+  - `mrz.py` (strategy-based document parsers: `BaseDocumentParser`, `TD3PassportParser`, `NationalIDParser` stub, `DocumentParserRouter`, plus backward-compatible OCR)
+  - `aadhaar.py` (`AadhaarDocumentParser` with UIDAI layout anchor detection, Verhoeff checksum algorithm, and masked UID enforcement)
+  - `pan.py` (`PANDocumentParser` with 10-char regex, 4th character entity type validation, and masked PAN representation)
+  - `qr.py` (`QRAnalyzer` for embedded document QR detection, adaptive binarization, payload classification, and masked summaries)
+  - `cross_signal.py` (`CrossSignalEvaluator` fusing cross-modal consistency between requested type, QR payload, OCR fields, and spatial tamper regions)
+  - `tampering.py` (multi-signal digital image forensics: ELA, compression, noise, edge, copy-move, metadata)
+  - `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests)
+  - `liveness.py` (passive ONNX + OpenCV presentation-attack screening)
+  - `risk_engine.py` (weighted deterministic scoring with cross-signal consistency factors).
+- `app/security/image_validation.py` — upload hardening (byte size, MIME, extension, signature, pixel count, dimensions, decompression bomb safety).
 - `app/models/schemas.py` — Pydantic request/response models.
 - `database.py` (repo root) — a backward-compatible shim re-exporting the `app.db` models plus `engine`/`SessionLocal`/`get_db`/`init_db` so legacy tooling imports keep working.
 
@@ -187,6 +206,9 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `RISK_UNKNOWN_MODULE` | `15` | Applied when face verification is skipped (no live photo). |
 | `RISK_LIVENESS_FAILED` | `35` | Applied (and forces `HIGH_RISK_REVIEW_REQUIRED`) when liveness returns `SPOOF_DETECTED`. |
 | `RISK_LIVENESS_UNCERTAIN` | `15` | Review penalty when liveness returns `UNCERTAIN`. |
+| `RISK_DOCUMENT_TYPE_MISMATCH` | `30` | Applied when detected document structure contradicts requested document type. |
+| `RISK_QR_OCR_CONFLICT` | `35` | Applied when QR payload identity metadata directly conflicts with OCR/MRZ data. |
+| `RISK_SUSPICIOUS_FIELD_TAMPERING` | `25` | Applied when tampering hotspots spatially intersect with critical identity text/MRZ regions. |
 | `DATABASE_URL` | `sqlite:///./document_screening.db` | Any SQLAlchemy URL; PostgreSQL recommended (`postgresql+psycopg://user:pass@host:5432/db`). |
 | `DB_CONNECT_TIMEOUT` | `5` | Seconds allowed for a PostgreSQL connect (also used for the readiness probe). |
 | `DB_CONNECT_RETRIES` | `5` | Startup re-attempts for `create_all` while PostgreSQL is still booting. |
@@ -215,9 +237,9 @@ Multipart form fields:
 - `live_photo`: optional JPG, PNG, or WebP live image.
 - `mrz_line1`: optional exact TD3 line 1 (passport MRZ form path).
 - `mrz_line2`: optional exact TD3 line 2 (passport MRZ form path).
-- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`/`aadhaar`. When `auto`, the parser is chosen by the document image aspect ratio (portrait passport data page vs. landscape ID-1 card).
+- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`, `aadhaar`, `pan`. When `auto`, the parser is chosen by document aspect ratio and layout anchor detection.
 
-Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td1|national_id|aadhaar` returns HTTP 422.
+Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td1|national_id|aadhaar|pan` returns HTTP 422.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/screen \
@@ -236,13 +258,13 @@ On success the 200 body includes a `persistence` field: `{"status": "stored", "s
 
 If the request carries a valid `Authorization: Bearer <token>` header, the screening is attributed to that operator in the audit trail. Without a header the scan still works and is recorded as anonymous. An invalid token is ignored for screening purposes (screening never fails because of a stale token).
 
-### Operator accounts
+### Operator accounts & RBAC
 
 ```bash
-# Register (roles are always "officer"; admins come from ADMIN_USERNAME bootstrap)
+# Register (roles: "officer", "supervisor", "admin")
 curl -X POST http://localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username": "officer01", "email": "officer01@example.com", "full_name": "A. Officer", "password": "SuperSecret123!"}'
+  -d '{"username": "officer01", "email": "officer01@example.com", "full_name": "A. Officer", "password": "SuperSecret123!", "role": "officer"}'
 
 # Login -> bearer token
 curl -X POST http://localhost:8000/api/v1/auth/login \
@@ -253,15 +275,16 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 
 Endpoints:
 
-- `POST /api/v1/auth/register` — create an officer account (201).
+- `POST /api/v1/auth/register` — create an operator account (201). Supports `role` assignment (`officer`, `supervisor`, `admin`).
 - `POST /api/v1/auth/login` — returns a bearer token.
 - `POST /api/v1/auth/logout` — revokes the current token.
 - `GET /api/v1/auth/me` — current user profile.
 
-### Screening history & reports (bearer token required)
+### Screening history, reports & decision override (bearer token required)
 
 - `GET /api/v1/screenings?limit=20&offset=0&decision=...&risk_level=...&date_from=...&date_to=...` — list audit records (newest first) with optional `decision`, `risk_level`, and naive-UTC `date_from`/`date_to` filters.
 - `GET /api/v1/screenings/{id_or_request_id}` — single audit record; accepts either the integer row id or the 32-character `request_id`.
+- `PATCH /api/v1/screenings/{item_id}/decision` — human-in-the-loop decision override (requires `officer`, `supervisor`, or `admin` role). Accepts `{"decision": "CLEARED" | "SECONDARY_INSPECTION_REQUIRED" | "HIGH_RISK_REVIEW_REQUIRED", "review_notes": "..."}`.
 - `GET /api/v1/screenings/{id_or_request_id}/factors` — the normalized risk-factor rows (name, severity, weight, description) for one screening.
 - `GET /api/v1/stats` — dashboard counts: totals, cleared, secondary inspection, high risk, MRZ failures, face mismatches, suspicious tampering, plus breakdowns by decision and risk level.
 - `GET /api/v1/report/summary` — totals per risk level and decision, cleared/secondary/high-risk counts, and average processing time.
@@ -270,7 +293,7 @@ Endpoints:
 curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v1/screenings?limit=10
 ```
 
-All screening history and report endpoints return `401` without a valid token.
+All screening history and report endpoints return `401` without a valid token. Decision override returns `403 FORBIDDEN` if the user's role is not authorized.
 
 ## Response Semantics
 
@@ -308,7 +331,7 @@ Decisions: `CLEARED` (all modules `PASS`, no risk factors), `SECONDARY_INSPECTIO
 
 Key states:
 
-- MRZ: `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `OCR_FAILED`, `OCR_LOW_CONFIDENCE` — plus document-level `format` (`TD3`/`TD1`/`UNKNOWN`) and `document_type` (`PASSPORT`/`NATIONAL_ID`/`UNKNOWN`).
+- Document/MRZ: `VALID`, `INVALID`, `MALFORMED`, `NOT_DETECTED`, `OCR_FAILED`, `OCR_LOW_CONFIDENCE` — plus document-level `format` (`TD3`/`TD1`/`UNKNOWN`) and `document_type` (`PASSPORT`/`NATIONAL_ID`/`AADHAAR`/`PAN`/`UNKNOWN`).
 - Tamper: `CLEAN`, `SUSPICIOUS`, `INCONCLUSIVE`, `ERROR` — with per-signal `score`/`suspicious` entries for `ela`, `compression`, `noise`, `edge`, `copy_move`, `metadata`. A failed signal degrades to `0`/`not suspicious` within the aggregate score rather than crashing the analysis.
 - Face: `MATCH`, `MISMATCH`, `NO_FACE`, `MULTIPLE_FACES`, `LOW_CONFIDENCE`, `INVALID_IMAGE`, `SKIPPED_NO_LIVE_PHOTO`, `ERROR`, `NOT_AVAILABLE`.
 - Liveness: `LIVE`, `SPOOF_DETECTED`, `UNCERTAIN`, `NOT_CHECKED`, `SKIPPED` — `is_live` is `true` only for `LIVE`; the `signals` object exposes per-signal heuristic scores and reasons when the OpenCV fallback ran.
@@ -338,16 +361,23 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The suite (176 tests) covers valid/malformed MRZ, all checksum failures, pivot-year expiry semantics, leap-year date handling, invalid sex/nationality fields, OCR failure and candidate rejection, TD1 structural parsing and checksums, parser routing by aspect ratio and explicit `document_type`, tamper statuses including INCONCLUSIVE handling, the uniform-blank-image copy-move regression, metadata-absence neutrality, passive-liveness classification (blank/spoof, noise/live, threshold boundaries, NOT_CHECKED and disabled paths, heuristic signal bounds, module-state mapping), the fail-safe and high-risk decision gates including the forced high-risk liveness gate, unknown-risk-factor rejection, ArcFace engine statuses (NO_FACE/MULTIPLE_FACES/LOW_CONFIDENCE/MATCH/MISMATCH), deterministic face bounding-box reporting, NaN/division-by-zero protection, X-Request-ID echo and sanitization, /health and /ready behavior, upload hardening (empty files, wrong extensions, MIME spoofing, oversized images, pixel-count and decompression-bomb protection), structured error bodies, safe handling of unexpected internal errors, plus the audit trail, authentication flow, protected history/report endpoints, summary rollup, repository CRUD with duplicate-request_id rejection, pagination/filters, dashboard stats, factor normalization, Alembic upgrade/downgrade/check, graceful behaviour when the database is unreachable (503, no leaks), and token-expiry comparisons with both naive (SQLite) and timezone-aware (PostgreSQL) timestamps.
+The comprehensive test suite (**220 tests, 100% pass rate**) covers:
+- **Aadhaar & PAN Parsing:** Verhoeff checksum validation, layout anchors, masked UID/PAN format validation (`tests/test_aadhaar_screening.py`, `tests/test_pan_screening.py`).
+- **QR Code Analysis:** Embedded QR extraction, adaptive preprocessing, payload classification, and masked summaries (`tests/test_qr_analysis.py`).
+- **Cross-Signal Consistency:** Document type mismatch, QR vs OCR conflict, spatial tampering overlap (`tests/test_cross_signal.py`).
+- **Security & RBAC:** Role-based access control (`tests/test_rbac.py`), CORS origin lockdown (`tests/test_cors_security.py`), upload security, path traversal filename protection, decompression bomb prevention, and model lifecycle (`tests/test_security_hardening.py`).
+- **Zero-PII Compliance:** Verification that database tables, schemas, repositories, and audit logs never persist raw names, document numbers, MRZ strings, face embeddings, or images (`tests/test_privacy_compliance.py`, `tests/test_persistence.py`).
+- **Core Pipeline:** TD3/TD1 MRZ parsing, 7-3-1 checksums, impossible-date & leap-year handling, Tesseract OCR candidate filtering, multi-signal tamper forensics, InsightFace ArcFace verification, passive liveness PAD (ONNX & OpenCV fallback), deterministic risk scoring, Alembic migrations & schema synchronization (`tests/test_migrations.py`), and database resilience.
 
 ## Security and Privacy
 
-- Uploaded images are validated by byte size, declared MIME type, actual image signature/format, and pixel dimensions, then processed in memory; the API does not persist uploads.
-- The audit trail stores screening risk metadata only. No passport numbers, names, MRZ text, raw images, or biometric embeddings are stored or logged.
-- Passwords are stored as salted PBKDF2 hashes; bearer tokens are stored as SHA-256 hashes with a TTL.
+- **Zero PII Persistence:** No raw applicant names, document numbers (passport, Aadhaar, PAN), MRZ lines, biometric embeddings, or images are stored in the database or written to disk. All biometric vectors and image buffers exist strictly in memory during request evaluation.
+- Uploaded images are validated by byte size, declared MIME type, actual image signature/format, pixel count, and dimensions; no uploads touch disk.
+- Passwords are stored as salted PBKDF2 hashes; bearer tokens are stored as SHA-256 hashes with an expiration TTL.
+- CORS origins are explicitly whitelisted and production rejects wildcard (`*`) origins when credentials are enabled.
+- Role-based access control gates manual decision overrides to authorized operators (`officer`, `supervisor`, `admin`).
 - `live_photo` and `document_image` files are always closed after reading.
-- CORS origins are configurable; no wildcard-plus-credentials combination is used.
-- The Docker process runs as a non-root user with a healthcheck.
+- The Docker process runs as a non-root user with an internal healthcheck.
 
 ## Production Readiness
 

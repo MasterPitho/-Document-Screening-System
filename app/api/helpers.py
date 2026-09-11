@@ -31,6 +31,8 @@ def get_request_id(request: Request) -> str:
 
 _ERROR_CODES_BY_STATUS = {
     400: "BAD_REQUEST",
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
     404: "NOT_FOUND",
     409: "CONFLICT",
     413: "FILE_TOO_LARGE",
@@ -38,7 +40,6 @@ _ERROR_CODES_BY_STATUS = {
     422: "VALIDATION_ERROR",
     500: "INTERNAL_ERROR",
     503: "DATABASE_UNAVAILABLE",
-    401: "UNAUTHORIZED",
 }
 
 

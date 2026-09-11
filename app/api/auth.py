@@ -87,6 +87,28 @@ def get_current_user(request: Request) -> User:
     return user
 
 
+def require_role(*roles: str):
+    """FastAPI dependency factory enforcing that the authenticated user possesses an allowed role.
+
+    The 'admin' role automatically satisfies all role requirements.
+    """
+    normalized_allowed = {r.strip().lower() for r in roles}
+    normalized_allowed.add("admin")
+
+    def dependency(request: Request) -> User:
+        user = get_current_user(request)
+        user_role = (user.role or "").strip().lower()
+        if user_role not in normalized_allowed:
+            allowed_display = ", ".join(sorted(roles))
+            raise HTTPException(
+                status_code=403,
+                detail=f"Forbidden: User role '{user.role}' lacks required permissions ({allowed_display}).",
+            )
+        return user
+
+    return dependency
+
+
 def as_user_out(user: User) -> UserOut:
     created = user.created_at
     return UserOut(

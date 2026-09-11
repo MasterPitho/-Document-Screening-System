@@ -251,6 +251,29 @@ def test_audit_log_repository_record():
         db.dispose()
 
 
+def test_audit_log_and_factor_records_contain_no_raw_pii():
+    """Verify that audit log records contain strictly audit metadata and zero raw PII."""
+    settings = Settings.from_env()
+    db = build_database(settings.database_url)
+    db.create_all(fail_silently=False)
+    try:
+        from app.db.models import AuditLog
+        cols = {c.name for c in AuditLog.__table__.columns}
+        assert not {"applicant_name", "document_number", "raw_mrz", "face_embedding"}.intersection(cols)
+
+        screening = _create(ScreeningRepository(db))
+        audit = AuditLogRepository(db).record(
+            screening_id=screening.id,
+            event_type="screening.created",
+            request_id=screening.request_id,
+            message="screening completed with risk_level=LOW_RISK",
+        )
+        assert audit.message == "screening completed with risk_level=LOW_RISK"
+        assert audit.request_id == screening.request_id
+    finally:
+        db.dispose()
+
+
 def test_user_and_token_repositories():
     settings = Settings.from_env()
     db = build_database(settings.database_url)
