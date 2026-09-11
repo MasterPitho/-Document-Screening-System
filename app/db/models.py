@@ -37,6 +37,7 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False)
     full_name = Column(String(120), nullable=False, default="")
     role = Column(String(20), nullable=False, default="officer")
+    officer_id = Column(String(50), nullable=True, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -89,6 +90,11 @@ class Screening(Base):
     mrz_source = Column(String(10), nullable=False, default="none")
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
+    applicant_name = Column(String(120), nullable=True)
+    document_number = Column(String(64), nullable=True)
+    country_code = Column(String(10), nullable=True)
+    notes = Column(Text, nullable=True)
+
     factor_rows = relationship(
         "ScreeningFactor",
         back_populates="screening",
@@ -108,6 +114,7 @@ class Screening(Base):
         Index("ix_screenings_created_at", created_at),
         Index("ix_screenings_decision", decision),
         Index("ix_screenings_risk_level", risk_level),
+        Index("ix_screenings_document_number", document_number),
     )
 
 

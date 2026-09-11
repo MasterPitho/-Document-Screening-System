@@ -121,6 +121,7 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     email: str = Field(min_length=5, max_length=255)
     full_name: str = Field(default="", max_length=120)
+    officer_id: Optional[str] = Field(default=None, max_length=50)
     password: str = Field(min_length=8, max_length=128)
 
 
@@ -130,6 +131,7 @@ class UserOut(BaseModel):
     email: str
     full_name: str
     role: str
+    officer_id: Optional[str] = None
     created_at: str
 
 
@@ -168,6 +170,50 @@ class ScreeningRecordOut(BaseModel):
     liveness_score: Optional[float] = None
     mrz_source: str
     user_id: Optional[int]
+    applicant_name: Optional[str] = None
+    document_number: Optional[str] = None
+    country_code: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+
+
+class TimelinePoint(BaseModel):
+    timestamp: str      # ISO datetime or formatted label like "06:00", "12:00"
+    risk_score: float   # average risk score in this bucket
+    count: int          # total screenings in this bucket
+
+
+class DashboardTrendResponse(BaseModel):
+    range: str
+    today_total: int
+    yesterday_total: int
+    delta_today_pct: float            # e.g. +18.4
+    avg_processing_time_ms: float
+    avg_time_delta_pct: float         # e.g. -6.8
+    average_risk_score: float         # average across the range
+    high_risk_events_count: int       # count of events where risk_score >= threshold
+    timeline: list[TimelinePoint]     # 5-10 time intervals for the graph
+
+
+class DecisionUpdateRequest(BaseModel):
+    decision: str                     # "CLEARED", "REVIEW", "HOLD", "SECONDARY_INSPECTION"
+    notes: Optional[str] = None
+
+
+class NotificationItem(BaseModel):
+    id: str
+    type: str
+    message: str
+    created_at: str
+    read: bool = False
+
+
+class WatchlistItem(BaseModel):
+    id: int
+    name: str
+    document_number: str
+    reason: str
+    severity: str
     created_at: str
 
 

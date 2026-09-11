@@ -76,6 +76,10 @@ class ScreeningRepository:
         factor_list: Sequence[dict[str, Any]],
         mrz_source: str,
         user_id: Optional[int] = None,
+        applicant_name: Optional[str] = None,
+        document_number: Optional[str] = None,
+        country_code: Optional[str] = None,
+        notes: Optional[str] = None,
         created_at: Optional[datetime.datetime] = None,
         audit_message: str = "",
     ) -> Screening:
@@ -108,6 +112,10 @@ class ScreeningRepository:
                 factors=[dict(f) for f in factor_list],
                 mrz_source=mrz_source,
                 user_id=user_id,
+                applicant_name=applicant_name,
+                document_number=document_number,
+                country_code=country_code,
+                notes=notes,
             )
             for factor in factor_list:
                 name = str(factor.get("factor", "UNKNOWN"))
@@ -263,6 +271,172 @@ class ScreeningRepository:
                 "by_risk_level": by_risk_level,
             }
 
+    def update_decision(
+        self,
+        screening_id: int,
+        decision: str,
+        status_color: str,
+        notes: Optional[str] = None,
+        officer_id: Optional[int] = None,
+    ) -> Optional[Screening]:
+        with self._database.session() as session:
+            screening = session.get(Screening, screening_id)
+            if screening is None:
+                return None
+            screening.decision = decision
+            screening.status_color = status_color
+            if notes is not None:
+                screening.notes = notes
+            audit_msg = f"decision={decision}"
+            if officer_id:
+                audit_msg += f" officer_id={officer_id}"
+            if notes:
+                audit_msg += f" notes={notes}"
+            session.add(AuditLog(
+                screening_id=screening.id,
+                event_type="decision.updated",
+                created_at=utcnow_naive(),
+                request_id=screening.request_id,
+                message=audit_msg,
+            ))
+            session.commit()
+            session.refresh(screening)
+            return screening
+
+    def trend(self, range_key: str = "24h", now: Optional[datetime.datetime] = None) -> dict[str, Any]:
+        now = now or utcnow_naive()
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_midnight = today_midnight - datetime.timedelta(days=1)
+
+        if range_key == "7d":
+            duration = datetime.timedelta(days=7)
+            bucket_delta = datetime.timedelta(days=1)
+            num_buckets = 7
+            fmt = "%b %d"
+        elif range_key == "30d":
+            duration = datetime.timedelta(days=30)
+            bucket_delta = datetime.timedelta(days=3)
+            num_buckets = 10
+            fmt = "%b %d"
+        else:
+            range_key = "24h"
+            duration = datetime.timedelta(hours=24)
+            bucket_delta = datetime.timedelta(hours=4)
+            num_buckets = 6
+            fmt = "%H:%M"
+
+        range_start = now - duration
+        prior_range_start = range_start - duration
+
+        with self._database.session() as session:
+            today_total = self._count(session, Screening.created_at >= today_midnight)
+            yesterday_total = self._count(
+                session,
+                (Screening.created_at >= yesterday_midnight) & (Screening.created_at < today_midnight),
+            )
+            if yesterday_total > 0:
+                delta_today_pct = round(((today_total - yesterday_total) / yesterday_total) * 100.0, 1)
+            elif today_total > 0:
+                delta_today_pct = 100.0
+            else:
+                delta_today_pct = 0.0
+
+            current_screenings = session.execute(
+                select(Screening).where(Screening.created_at >= range_start)
+            ).scalars().all()
+
+            total_curr = len(current_screenings)
+            if total_curr > 0:
+                avg_processing_time_ms = round(
+                    sum(s.processing_time_ms for s in current_screenings) / total_curr, 1
+                )
+                average_risk_score = round(
+                    sum(s.risk_score for s in current_screenings) / total_curr, 1
+                )
+                high_risk_events_count = sum(
+                    1 for s in current_screenings
+                    if s.risk_score >= 65
+                    or s.risk_level == "HIGH_RISK"
+                    or s.decision == "HIGH_RISK_REVIEW_REQUIRED"
+                )
+            else:
+                avg_processing_time_ms = 0.0
+                average_risk_score = 0.0
+                high_risk_events_count = 0
+
+            prior_times = session.execute(
+                select(Screening.processing_time_ms).where(
+                    (Screening.created_at >= prior_range_start) & (Screening.created_at < range_start)
+                )
+            ).scalars().all()
+            if prior_times and len(prior_times) > 0:
+                prior_avg = sum(prior_times) / len(prior_times)
+                if prior_avg > 0:
+                    avg_time_delta_pct = round(
+                        ((avg_processing_time_ms - prior_avg) / prior_avg) * 100.0, 1
+                    )
+                else:
+                    avg_time_delta_pct = 0.0
+            else:
+                avg_time_delta_pct = 0.0
+
+            timeline = []
+            for i in range(num_buckets):
+                b_start = range_start + i * bucket_delta
+                b_end = b_start + bucket_delta
+                b_records = [
+                    s for s in current_screenings
+                    if b_start <= _normalize_utc(s.created_at) < b_end
+                    or (i == num_buckets - 1 and b_start <= _normalize_utc(s.created_at) <= now)
+                ]
+                count = len(b_records)
+                risk_avg = round(sum(s.risk_score for s in b_records) / count, 1) if count > 0 else 0.0
+                timeline.append({
+                    "timestamp": b_start.strftime(fmt),
+                    "risk_score": risk_avg,
+                    "count": count,
+                })
+
+            return {
+                "range": range_key,
+                "today_total": today_total,
+                "yesterday_total": yesterday_total,
+                "delta_today_pct": delta_today_pct,
+                "avg_processing_time_ms": avg_processing_time_ms,
+                "avg_time_delta_pct": avg_time_delta_pct,
+                "average_risk_score": average_risk_score,
+                "high_risk_events_count": high_risk_events_count,
+                "timeline": timeline,
+            }
+
+    def recent_notifications(
+        self,
+        limit: int = 10,
+        unread_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        with self._database.session() as session:
+            stmt = select(Screening).where(
+                (Screening.risk_score >= 65) |
+                (Screening.risk_level == "HIGH_RISK") |
+                (Screening.decision == "HIGH_RISK_REVIEW_REQUIRED") |
+                (Screening.status_color == "RED")
+            ).order_by(Screening.id.desc())
+            if unread_only:
+                stmt = stmt.where(Screening.decision == "HIGH_RISK_REVIEW_REQUIRED")
+            rows = session.execute(stmt.limit(limit)).scalars().all()
+            notifications = []
+            for s in rows:
+                doc_str = s.document_number or (s.request_id[:8] if s.request_id else "UNKNOWN")
+                is_read = s.decision in {"CLEARED", "REVIEW"}
+                notifications.append({
+                    "id": f"notif-{s.id}",
+                    "type": "HIGH_RISK_ALERT",
+                    "message": f"High risk detected on document {doc_str}",
+                    "created_at": s.created_at.isoformat() if s.created_at else "",
+                    "read": is_read,
+                })
+            return notifications
+
     @staticmethod
     def _count(session, condition) -> int:
         stmt = select(func.count()).select_from(Screening)
@@ -307,10 +481,37 @@ class UserRepository:
         self._database = database
 
     def get_by_username(self, username: str) -> Optional[User]:
+        identifier = username.strip()
         with self._database.session() as session:
-            return session.execute(
-                select(User).where(User.username == username)
-            ).scalar_one_or_none()
+            # 1. Exact match on username, officer_id, or email
+            user = session.execute(
+                select(User).where(
+                    (User.username == identifier) |
+                    (User.officer_id == identifier) |
+                    (User.email == identifier)
+                )
+            ).scalars().first()
+            if user is not None:
+                return user
+
+            # 2. Case-insensitive match on username, officer_id, or email
+            user = session.execute(
+                select(User).where(
+                    (func.lower(User.username) == identifier.lower()) |
+                    (func.lower(User.officer_id) == identifier.lower()) |
+                    (func.lower(User.email) == identifier.lower())
+                )
+            ).scalars().first()
+            if user is not None:
+                return user
+
+            # 3. Officer ID badge pattern, e.g. "LT-04" or "LT-4" -> user with id=4
+            import re
+            m = re.match(r"^(?:LT|OFFICER)-?0*(\d+)$", identifier, re.IGNORECASE)
+            if m:
+                uid = int(m.group(1))
+                return session.get(User, uid)
+            return None
 
     def get_by_email(self, email: str) -> Optional[User]:
         with self._database.session() as session:
@@ -340,6 +541,7 @@ class UserRepository:
         full_name: str,
         role: str,
         password_hash: str,
+        officer_id: Optional[str] = None,
     ) -> User:
         with self._database.session() as session:
             user = User(
@@ -347,6 +549,7 @@ class UserRepository:
                 email=email,
                 full_name=full_name,
                 role=role,
+                officer_id=officer_id,
                 password_hash=password_hash,
                 is_active=True,
             )

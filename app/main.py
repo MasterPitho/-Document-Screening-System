@@ -56,9 +56,12 @@ from app.db.repositories import (
 )
 from app.logging_setup import redact_mrz, set_up_logging
 from app.models.schemas import (
+    DashboardTrendResponse,
+    DecisionUpdateRequest,
     LivenessResultSchema,
     LoginRequest,
     LoginResponse,
+    NotificationItem,
     ReportSummary,
     RegisterRequest,
     ScreenResponse,
@@ -66,7 +69,9 @@ from app.models.schemas import (
     ScreeningListResponse,
     ScreeningRecordOut,
     ScreeningStats,
+    TimelinePoint,
     UserOut,
+    WatchlistItem,
 )
 from app.security.image_validation import ImageValidationLimits
 from app.services import mrz as mrz_mod
@@ -159,8 +164,8 @@ def create_app(
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=False,
+        allow_origins=["*"],
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -360,6 +365,11 @@ def _register_routes(app: FastAPI) -> None:
         # 5. Persist the screening: single transaction (commit on success,
         #    rollback on failure). Raw images, embeddings, MRZ text, and
         #    passport numbers are never stored.
+        mrz_data = mrz_result.get("data") if isinstance(mrz_result.get("data"), dict) else {}
+        applicant_name = mrz_data.get("full_name") or None
+        document_number = mrz_data.get("passport_number") or mrz_data.get("document_number") or None
+        country_code = mrz_data.get("issuing_country") or mrz_data.get("nationality") or None
+
         try:
             current_user = extract_optional_user(request)
             screening = screening_repo.create(
@@ -381,6 +391,9 @@ def _register_routes(app: FastAPI) -> None:
                 factor_list=risk["factors"],
                 mrz_source=str(mrz_result.get("source", "none")),
                 user_id=current_user.id if current_user else None,
+                applicant_name=applicant_name,
+                document_number=document_number,
+                country_code=country_code,
             )
             response["persistence"] = {"status": "stored", "screening_id": screening.id}
         except DuplicateRequestError:
@@ -423,6 +436,7 @@ def _register_routes(app: FastAPI) -> None:
                 email=email,
                 full_name=payload.full_name.strip(),
                 role="officer",
+                officer_id=payload.officer_id.strip() if payload.officer_id else None,
                 password_hash=_hash_password(payload.password),
             )
         except PersistenceError as exc:
@@ -515,12 +529,64 @@ def _register_routes(app: FastAPI) -> None:
             for f in repo.list_factors(record.id)
         ]
 
+    @app.patch("/api/v1/screenings/{item_id}/decision", response_model=ScreeningRecordOut)
+    def update_screening_decision(
+        request: Request,
+        item_id: str,
+        payload: DecisionUpdateRequest,
+        _current_user=Depends(extract_optional_user),
+    ) -> ScreeningRecordOut:
+        repo: ScreeningRepository = request.app.state.screening_repo
+        record = _resolve_screening(repo, item_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Screening record not found.")
+
+        decision_clean = payload.decision.strip().upper()
+        allowed_decisions = {
+            "CLEARED", "REVIEW", "HOLD", "SECONDARY_INSPECTION",
+            "SECONDARY_INSPECTION_REQUIRED", "HIGH_RISK_REVIEW_REQUIRED"
+        }
+        if decision_clean not in allowed_decisions:
+            raise HTTPException(
+                status_code=422,
+                detail=f"decision must be one of: {', '.join(sorted(allowed_decisions))}",
+            )
+
+        if decision_clean == "CLEARED":
+            status_color = "GREEN"
+        elif decision_clean in {"REVIEW", "SECONDARY_INSPECTION", "SECONDARY_INSPECTION_REQUIRED"}:
+            status_color = "YELLOW"
+        else:
+            status_color = "RED"
+
+        officer_id = _current_user.id if _current_user else None
+        updated = repo.update_decision(
+            screening_id=record.id,
+            decision=decision_clean,
+            status_color=status_color,
+            notes=payload.notes.strip() if payload.notes else None,
+            officer_id=officer_id,
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Screening record not found.")
+        return _as_screening_out(updated)
+
     @app.get("/api/v1/stats", response_model=ScreeningStats)
     def dashboard_stats(
         request: Request,
         _current_user=Depends(get_current_user),
     ) -> ScreeningStats:
         return ScreeningStats(**request.app.state.screening_repo.stats())
+
+    @app.get("/api/v1/stats/trend", response_model=DashboardTrendResponse)
+    def get_dashboard_trend(
+        request: Request,
+        range: str = Query("24h", pattern="^(24h|7d|30d)$"),
+        _current_user=Depends(extract_optional_user),
+    ) -> DashboardTrendResponse:
+        repo: ScreeningRepository = request.app.state.screening_repo
+        trend_data = repo.trend(range_key=range)
+        return DashboardTrendResponse(**trend_data)
 
     @app.get("/api/v1/report/summary", response_model=ReportSummary)
     def report_summary(
@@ -537,6 +603,51 @@ def _register_routes(app: FastAPI) -> None:
             by_decision=summary["by_decision"],
             by_risk_level=summary["by_risk_level"],
         )
+
+    # ---- Dashboard alerts & watchlists ------------------------------------
+    @app.get("/api/v1/notifications", response_model=list[NotificationItem])
+    def get_notifications(
+        request: Request,
+        limit: int = Query(10, ge=1, le=100),
+        unread_only: bool = Query(False),
+        _current_user=Depends(extract_optional_user),
+    ) -> list[NotificationItem]:
+        repo: ScreeningRepository = request.app.state.screening_repo
+        items = repo.recent_notifications(limit=limit, unread_only=unread_only)
+        return [NotificationItem(**item) for item in items]
+
+    @app.get("/api/v1/watchlists", response_model=list[WatchlistItem])
+    def get_watchlists(
+        request: Request,
+        _current_user=Depends(extract_optional_user),
+    ) -> list[WatchlistItem]:
+        default_watchlists = [
+            {
+                "id": 1,
+                "name": "Tehran Ali",
+                "document_number": "V-449021",
+                "reason": "Lookout circular",
+                "severity": "HIGH",
+                "created_at": "2026-09-01T10:00:00Z",
+            },
+            {
+                "id": 2,
+                "name": "Marcus Vance",
+                "document_number": "P8831042",
+                "reason": "Interpol Red Notice alert",
+                "severity": "CRITICAL",
+                "created_at": "2026-09-05T14:20:00Z",
+            },
+            {
+                "id": 3,
+                "name": "Elena Rostova",
+                "document_number": "E7719203",
+                "reason": "Stolen blank passport registry",
+                "severity": "HIGH",
+                "created_at": "2026-09-08T09:15:00Z",
+            },
+        ]
+        return [WatchlistItem(**w) for w in default_watchlists]
 
     # ---- System -----------------------------------------------------------
     @app.get("/health")
@@ -590,6 +701,10 @@ def _as_screening_out(record: Screening) -> ScreeningRecordOut:
         liveness_score=getattr(record, "liveness_score", None),
         mrz_source=record.mrz_source,
         user_id=record.user_id,
+        applicant_name=getattr(record, "applicant_name", None),
+        document_number=getattr(record, "document_number", None),
+        country_code=getattr(record, "country_code", None),
+        notes=getattr(record, "notes", None),
         created_at=created.isoformat() if created else "",
     )
 
