@@ -377,7 +377,7 @@ Error codes: `BAD_REQUEST` (400), `NOT_FOUND` (404), `UNPROCESSABLE_ENTITY`/`VAL
 
 ## Testing & CI
 
-Continuous Integration is automated via GitHub Actions (`.github/workflows/tests.yml`), running the test suite on every push and pull request against Python 3.11.
+Continuous Integration is automated via GitHub Actions (`.github/workflows/tests.yml`), running the test suite on every push and pull request against Python 3.12.
 
 ```bash
 pip install -r requirements-dev.txt
