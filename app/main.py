@@ -650,6 +650,15 @@ def _register_routes(app: FastAPI) -> None:
         return [WatchlistItem(**w) for w in default_watchlists]
 
     # ---- System -----------------------------------------------------------
+    @app.get("/")
+    def root() -> Dict[str, str]:
+        return {
+            "status": "ok",
+            "service": "Document Screening Engine",
+            "docs": "/docs",
+            "health": "/health",
+        }
+
     @app.get("/health")
     def health_check(request: Request) -> Dict[str, str]:
         # No sensitive information is exposed here.

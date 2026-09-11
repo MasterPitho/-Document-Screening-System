@@ -101,17 +101,30 @@ def as_user_out(user: User) -> UserOut:
 
 
 def bootstrap_admin(database: Database, settings: Settings) -> None:
-    if not settings.admin_username or not settings.admin_password or not settings.admin_email:
-        return
     from app.db.repositories import UserRepository
 
     repo = UserRepository(database)
-    if repo.get_by_username(settings.admin_username) is not None:
-        return
-    repo.create(
-        username=settings.admin_username,
-        email=settings.admin_email,
-        full_name="System Admin",
-        role="admin",
-        password_hash=_hash_password(settings.admin_password),
-    )
+    # 1. Configured admin from settings if provided
+    if settings.admin_username and settings.admin_password and settings.admin_email:
+        if repo.get_by_username(settings.admin_username) is None:
+            repo.create(
+                username=settings.admin_username,
+                email=settings.admin_email,
+                full_name="System Admin",
+                role="admin",
+                password_hash=_hash_password(settings.admin_password),
+            )
+
+    # 2. Default officer account for testing (Officer ID: LT-04 / password: Officer123!)
+    if repo.get_by_username("LT-04") is None and repo.get_by_username("officer") is None:
+        try:
+            repo.create(
+                username="officer",
+                email="officer@sentinel.gov",
+                full_name="Border Patrol Officer",
+                role="officer",
+                officer_id="LT-04",
+                password_hash=_hash_password("Officer123!"),
+            )
+        except Exception:  # noqa: BLE001
+            pass
