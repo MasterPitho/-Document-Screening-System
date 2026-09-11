@@ -28,6 +28,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -46,7 +47,8 @@ from app.api.auth import (
 from app.api.helpers import get_request_id, logger, structured_error
 from app.config import Settings
 from app.db.database import Database, DatabaseConnector, build_database, utcnow_naive
-from app.db.models import Screening
+from app.db.models import Screening, User
+from app.security.rate_limiter import ResourceLimiter
 from app.db.repositories import (
     AuditLogRepository,
     AuthTokenRepository,
@@ -163,6 +165,7 @@ def create_app(
     app.state.audit_repo = audit_repo
     app.state.user_repo = user_repo
     app.state.token_repo = token_repo
+    app.state.resource_limiter = ResourceLimiter(settings)
 
     cors_origins = list(settings.cors_origins) if settings.cors_origins else ["*"]
     allow_credentials = settings.cors_allow_credentials and "*" not in cors_origins
@@ -194,6 +197,7 @@ def create_app(
         return structured_error(
             exc.status_code, str(exc.detail), detail=str(exc.detail),
             request_id=request_id,
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -201,7 +205,7 @@ def create_app(
         request_id = getattr(request.state, "request_id", "")
         logger.info("validation_error", path=request.url.path, request_id=request_id)
         return structured_error(
-            422, "Request validation failed.", detail=exc.errors(),
+            422, "Request validation failed.", detail=jsonable_encoder(exc.errors()),
             request_id=request_id,
         )
 
@@ -233,6 +237,46 @@ def _register_routes(app: FastAPI) -> None:
         mrz_line1: Optional[str] = Form(None),
         mrz_line2: Optional[str] = Form(None),
         document_type: Optional[str] = Form(None),
+        current_user: User = Depends(get_current_user),
+    ) -> Dict[str, object]:
+        state = request.app.state
+        settings = state.settings
+        validation_limits = state.validation
+        tampering_detector = state.tampering
+        risk_engine = state.risk_engine
+        model_manager = state.model_manager
+        liveness_detector = state.liveness
+        screening_repo = state.screening_repo
+        audit_repo = state.audit_repo
+
+        resource_limiter: Optional[ResourceLimiter] = getattr(state, "resource_limiter", None)
+        if resource_limiter is not None:
+            client_id = resource_limiter.get_client_identifier(request, user_id=current_user.id)
+            await resource_limiter.check_rate_limit(client_id)
+            await resource_limiter.acquire_slot()
+
+        try:
+            return await _screen_document_impl(
+                request=request,
+                document_image=document_image,
+                live_photo=live_photo,
+                mrz_line1=mrz_line1,
+                mrz_line2=mrz_line2,
+                document_type=document_type,
+                current_user=current_user,
+            )
+        finally:
+            if resource_limiter is not None:
+                resource_limiter.release_slot()
+
+    async def _screen_document_impl(
+        request: Request,
+        document_image: UploadFile,
+        live_photo: Optional[UploadFile],
+        mrz_line1: Optional[str],
+        mrz_line2: Optional[str],
+        document_type: Optional[str],
+        current_user: User,
     ) -> Dict[str, object]:
         state = request.app.state
         settings = state.settings
@@ -355,6 +399,7 @@ def _register_routes(app: FastAPI) -> None:
         )
 
         processing_time_ms = int((time.perf_counter() - started_at) * 1000)
+        privacy_mrz = to_privacy_safe_mrz(mrz_result)
 
         response: Dict[str, object] = {
             "status": "SCREENED",
@@ -369,14 +414,14 @@ def _register_routes(app: FastAPI) -> None:
                 "tampering_analysis": tamper_result,
                 "face_verification": face_result,
                 "liveness": liveness_result,
-                "mrz_validation": mrz_result,
+                "mrz_validation": privacy_mrz,
                 "cross_signal": {
                     "is_consistent": cross_result.is_consistent,
                     "conflicts": cross_result.conflicts,
                 },
             },
             "risk_assessment": risk,
-            "mrz": mrz_result,
+            "mrz": privacy_mrz,
             "tampering_analysis": tamper_result,
             "face_verification": face_result,
             "liveness": LivenessResultSchema.from_service(liveness_result),
@@ -386,7 +431,6 @@ def _register_routes(app: FastAPI) -> None:
         #    rollback on failure). Raw images, embeddings, MRZ text, and
         #    identifying numbers/names are never stored.
         try:
-            current_user = extract_optional_user(request)
             screening = screening_repo.create(
                 request_id=request_id,
                 processing_time_ms=processing_time_ms,
@@ -405,7 +449,7 @@ def _register_routes(app: FastAPI) -> None:
                 module_states=dict(risk["module_statuses"]),
                 factor_list=risk["factors"],
                 mrz_source=str(mrz_result.get("source", "none")),
-                user_id=current_user.id if current_user else None,
+                user_id=current_user.id,
             )
             response["persistence"] = {"status": "stored", "screening_id": screening.id}
         except DuplicateRequestError:
@@ -442,12 +486,15 @@ def _register_routes(app: FastAPI) -> None:
         email = payload.email.strip().lower()
         if not username or not email:
             raise HTTPException(status_code=422, detail="username and email are required.")
+        # Public registration always creates 'officer'.
+        # Privileged roles (supervisor, admin) can only be created via secure bootstrap
+        # or authenticated administrative management. Client-supplied roles are ignored.
         try:
             user = request.app.state.user_repo.create(
                 username=username,
                 email=email,
                 full_name=payload.full_name.strip(),
-                role=payload.role.strip().lower() if payload.role else "officer",
+                role="officer",
                 officer_id=payload.officer_id.strip() if payload.officer_id else None,
                 password_hash=_hash_password(payload.password),
             )
@@ -497,9 +544,12 @@ def _register_routes(app: FastAPI) -> None:
         date_to: Optional[datetime.datetime] = Query(None),
     ) -> ScreeningListResponse:
         repo: ScreeningRepository = request.app.state.screening_repo
+        user_scope = _current_user.id if _current_user.role == "officer" else None
         total, records = repo.list(
             decision=decision, risk_level=risk_level,
-            date_from=date_from, date_to=date_to, limit=limit, offset=offset,
+            date_from=date_from, date_to=date_to,
+            user_id=user_scope,
+            limit=limit, offset=offset,
         )
         return ScreeningListResponse(
             total=total,
@@ -594,7 +644,7 @@ def _register_routes(app: FastAPI) -> None:
     def get_dashboard_trend(
         request: Request,
         range: str = Query("24h", pattern="^(24h|7d|30d)$"),
-        _current_user=Depends(extract_optional_user),
+        _current_user=Depends(get_current_user),
     ) -> DashboardTrendResponse:
         repo: ScreeningRepository = request.app.state.screening_repo
         trend_data = repo.trend(range_key=range)
@@ -622,7 +672,7 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         limit: int = Query(10, ge=1, le=100),
         unread_only: bool = Query(False),
-        _current_user=Depends(extract_optional_user),
+        _current_user=Depends(get_current_user),
     ) -> list[NotificationItem]:
         repo: ScreeningRepository = request.app.state.screening_repo
         items = repo.recent_notifications(limit=limit, unread_only=unread_only)
@@ -631,7 +681,7 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/v1/watchlists", response_model=list[WatchlistItem])
     def get_watchlists(
         request: Request,
-        _current_user=Depends(extract_optional_user),
+        _current_user=Depends(get_current_user),
     ) -> list[WatchlistItem]:
         default_watchlists = [
             {
@@ -641,6 +691,8 @@ def _register_routes(app: FastAPI) -> None:
                 "reason": "Lookout circular",
                 "severity": "HIGH",
                 "created_at": "2026-09-01T10:00:00Z",
+                "is_demo_data": True,
+                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
             },
             {
                 "id": 2,
@@ -649,6 +701,8 @@ def _register_routes(app: FastAPI) -> None:
                 "reason": "Interpol Red Notice alert",
                 "severity": "CRITICAL",
                 "created_at": "2026-09-05T14:20:00Z",
+                "is_demo_data": True,
+                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
             },
             {
                 "id": 3,
@@ -657,6 +711,8 @@ def _register_routes(app: FastAPI) -> None:
                 "reason": "Stolen blank passport registry",
                 "severity": "HIGH",
                 "created_at": "2026-09-08T09:15:00Z",
+                "is_demo_data": True,
+                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
             },
         ]
         return [WatchlistItem(**w) for w in default_watchlists]
@@ -690,6 +746,55 @@ def _register_routes(app: FastAPI) -> None:
             "status": "ready" if ready else "not_ready",
             "modules": modules,
         })
+
+
+def to_privacy_safe_mrz(raw_mrz: dict[str, Any]) -> dict[str, Any]:
+    """Strip all raw identity PII from MRZ validation output for public exposure."""
+    detected = bool(raw_mrz.get("detected", False))
+    status = str(raw_mrz.get("status", "NOT_DETECTED"))
+    source = str(raw_mrz.get("source", "none"))
+    doc_type = str(raw_mrz.get("document_type") or raw_mrz.get("format") or ("PASSPORT" if detected else "UNKNOWN"))
+
+    validation = raw_mrz.get("validation", {}) if isinstance(raw_mrz.get("validation"), dict) else {}
+    checks = raw_mrz.get("checks", {}) if isinstance(raw_mrz.get("checks"), dict) else {}
+    checksum_valid = bool(
+        validation.get("checksums_valid")
+        or checks.get("verhoeff_valid")
+        or checks.get("checksum_valid")
+        or (status == "VALID" and detected)
+    )
+    format_valid = bool(
+        validation.get("structure_valid")
+        or status in ("VALID", "CHECKSUM_VERIFIED", "STRUCTURALLY_VALID")
+    )
+
+    fields_detected = 0
+    if raw_mrz.get("data") and isinstance(raw_mrz["data"], dict):
+        fields_detected = len(raw_mrz["data"])
+    if raw_mrz.get("anchors_found") and isinstance(raw_mrz["anchors_found"], (list, tuple)):
+        fields_detected += len(raw_mrz["anchors_found"])
+
+    issues: list[str] = []
+    if raw_mrz.get("reason"):
+        issues.append(str(raw_mrz["reason"]))
+    if raw_mrz.get("error"):
+        issues.append(str(raw_mrz["error"]))
+
+    module_state = str(raw_mrz.get("module_state") or ("PASS" if status == "VALID" else ("REVIEW" if status in ("INVALID", "MALFORMED", "OCR_LOW_CONFIDENCE", "NOT_DETECTED") else "NOT_AVAILABLE")))
+
+    return {
+        "detected": detected,
+        "valid": status == "VALID",
+        "status": status,
+        "source": source,
+        "document_type": doc_type,
+        "checksum_valid": checksum_valid,
+        "format_valid": format_valid,
+        "fields_detected": fields_detected,
+        "issues": issues,
+        "module_state": module_state,
+        "confidence": float(raw_mrz.get("confidence", 0.0)),
+    }
 
 
 def _resolve_screening(repo: ScreeningRepository, item_id: str) -> Optional[Screening]:

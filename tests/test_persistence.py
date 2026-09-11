@@ -8,9 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from sqlalchemy import select
 from app.config import Settings
 from app.db.database import build_database, utcnow_naive
-from app.db.models import Screening
+from app.db.models import Screening, User
 from app.db.repositories import (
     AuditLogRepository,
     DuplicateRequestError,
@@ -308,7 +309,12 @@ def test_user_and_token_repositories():
 
 def test_stats_filters_and_factors_endpoints():
     client = TestClient(_app())
-    token = _register_and_login(client, f"api_{uuid.uuid4().hex[:8]}")
+    uname = f"api_{uuid.uuid4().hex[:8]}"
+    token = _register_and_login(client, uname)
+    with client.app.state.database.session() as session:
+        user = session.execute(select(User).where(User.username == uname)).scalar_one()
+        user.role = "supervisor"
+        session.commit()
     headers = {"Authorization": f"Bearer {token}"}
 
     repo = client.app.state.screening_repo

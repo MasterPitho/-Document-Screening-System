@@ -55,6 +55,112 @@ def test_cross_signal_flags_qr_ocr_conflict():
     assert "QR_OCR_CONFLICT" in factor_names
 
 
+def test_cross_signal_matching_qr_ocr_no_conflict():
+    evaluator = CrossSignalEvaluator()
+    doc_result = {
+        "detected": True,
+        "document_type": "AADHAAR",
+        "status": "VALID",
+        "data": {
+            "ocr_masked_uid": "XXXX-XXXX-1234",
+        },
+        "qr": {
+            "detected": True,
+            "readable": True,
+            "payload_type": "AADHAAR_XML",
+            "masked_uid": "XXXX-XXXX-1234",  # Matches OCR!
+        },
+    }
+    res = evaluator.evaluate(
+        requested_type="aadhaar",
+        doc_result=doc_result,
+        tamper_result={"status": "CLEAN", "suspicious_regions": []},
+        face_result={"status": "MATCH"},
+    )
+    assert res.is_consistent
+    factor_names = [f["factor"] for f in res.factors]
+    assert "QR_OCR_CONFLICT" not in factor_names
+
+
+def test_cross_signal_masked_formats_normalize():
+    evaluator = CrossSignalEvaluator()
+    # Spaced OCR vs hyphenated QR with same last 4 digits
+    doc_result = {
+        "detected": True,
+        "document_type": "AADHAAR",
+        "status": "VALID",
+        "data": {
+            "ocr_masked_uid": "XXXX XXXX 1234",
+        },
+        "qr": {
+            "detected": True,
+            "readable": True,
+            "payload_type": "AADHAAR_XML",
+            "masked_uid": "XXXX-XXXX-1234",
+        },
+    }
+    res = evaluator.evaluate(
+        requested_type="aadhaar",
+        doc_result=doc_result,
+        tamper_result={"status": "CLEAN", "suspicious_regions": []},
+        face_result={"status": "MATCH"},
+    )
+    assert res.is_consistent
+    factor_names = [f["factor"] for f in res.factors]
+    assert "QR_OCR_CONFLICT" not in factor_names
+
+
+def test_cross_signal_missing_qr_no_conflict():
+    evaluator = CrossSignalEvaluator()
+    doc_result = {
+        "detected": True,
+        "document_type": "AADHAAR",
+        "status": "VALID",
+        "data": {
+            "masked_uid": "XXXX-XXXX-1234",
+        },
+        "qr": {
+            "detected": False,
+            "readable": False,
+        },
+    }
+    res = evaluator.evaluate(
+        requested_type="aadhaar",
+        doc_result=doc_result,
+        tamper_result={"status": "CLEAN", "suspicious_regions": []},
+        face_result={"status": "MATCH"},
+    )
+    assert res.is_consistent
+    factor_names = [f["factor"] for f in res.factors]
+    assert "QR_OCR_CONFLICT" not in factor_names
+
+
+def test_cross_signal_unreadable_qr_no_conflict():
+    evaluator = CrossSignalEvaluator()
+    doc_result = {
+        "detected": True,
+        "document_type": "AADHAAR",
+        "status": "VALID",
+        "data": {
+            "masked_uid": "XXXX-XXXX-1234",
+        },
+        "qr": {
+            "detected": True,
+            "readable": False,
+            "payload_type": "UNKNOWN",
+        },
+    }
+    res = evaluator.evaluate(
+        requested_type="aadhaar",
+        doc_result=doc_result,
+        tamper_result={"status": "CLEAN", "suspicious_regions": []},
+        face_result={"status": "MATCH"},
+    )
+    assert res.is_consistent
+    factor_names = [f["factor"] for f in res.factors]
+    assert "QR_OCR_CONFLICT" not in factor_names
+
+
 def test_cross_signal_flags_suspicious_field_tampering():
     evaluator = CrossSignalEvaluator()
     doc_result = {

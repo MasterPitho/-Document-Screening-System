@@ -164,7 +164,9 @@ def test_stats_trend_7d_and_30d(app_and_client):
 
 def test_stats_trend_invalid_range(app_and_client):
     _, client = app_and_client
-    resp = client.get("/api/v1/stats/trend?range=100d")
+    token = _auth_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = client.get("/api/v1/stats/trend?range=100d", headers=headers)
     assert resp.status_code == 422
 
 

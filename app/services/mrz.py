@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -51,6 +52,7 @@ PARSER_ALIASES: dict[str, str] = {
     "national_id": "national_id",
     "aadhaar": "aadhaar",
     "pan": "pan",
+    "unknown": "unknown",
 }
 
 
@@ -716,8 +718,50 @@ class NationalIDTD1Parser(BaseDocumentParser):
 NationalIDParser = NationalIDTD1Parser  # backward-compatible alias
 
 
+class UnknownDocumentParser(BaseDocumentParser):
+    """Fallback strategy returned when auto-routing cannot identify document type."""
+
+    name = "unknown"
+    document_type = "UNKNOWN"
+    format = "UNKNOWN"
+
+    def can_parse(self, image_bgr: np.ndarray) -> bool:
+        return True
+
+    def parse(
+        self,
+        image: Any,
+        settings: Optional[Settings] = None,
+        line1: Optional[str] = None,
+        line2: Optional[str] = None,
+        line3: Optional[str] = None,
+        **kwargs: Any,
+    ) -> DocumentParseResult:
+        routing_info = kwargs.get("routing_info", {})
+        raw = {
+            "detected": False,
+            "status": "NOT_DETECTED",
+            "source": "auto_router",
+            "confidence": 0.0,
+            "reason": "Could not determine document type from visual/textual evidence; ambiguous or unidentifiable document.",
+            "document_type": "UNKNOWN",
+            "format": "UNKNOWN",
+            "routing": routing_info,
+        }
+        return DocumentParseResult(
+            detected=False,
+            status="NOT_DETECTED",
+            document_type="UNKNOWN",
+            format="UNKNOWN",
+            confidence=0.0,
+            data={},
+            raw=raw,
+            error=raw["reason"],
+        )
+
+
 class DocumentParserRouter:
-    """Selects a parser by explicit ``document_type`` or by aspect ratio."""
+    """Selects a parser by explicit ``document_type`` or multi-signal evidence scoring."""
 
     def __init__(self, passport_min_ratio: float = PASSPORT_MIN_RATIO) -> None:
         self.passport_min_ratio = passport_min_ratio
@@ -735,6 +779,8 @@ class DocumentParserRouter:
             elif key == "pan":
                 from app.services.pan import PANDocumentParser
                 self._parsers["pan"] = PANDocumentParser()
+            elif key == "unknown":
+                self._parsers["unknown"] = UnknownDocumentParser()
             else:
                 raise ValueError(f"Unknown parser key: {key}")
         return self._parsers[key]
@@ -750,19 +796,141 @@ class DocumentParserRouter:
                 "td3/passport, td1/national_id, aadhaar, pan.")
         return key
 
+    def score_evidence(
+        self, image_bgr: np.ndarray
+    ) -> tuple[dict[str, int], dict[str, list[str]], bool]:
+        """Score visual, textual, and barcode evidence for each supported document type."""
+        scores = {"passport": 0, "national_id": 0, "aadhaar": 0, "pan": 0}
+        evidence: dict[str, list[str]] = {k: [] for k in scores}
+        ocr_error = False
+
+        if image_bgr is None or image_bgr.size == 0 or image_bgr.shape[0] == 0:
+            return scores, evidence, False
+
+        height, width = image_bgr.shape[:2]
+        ratio = width / max(1, height)
+
+        # 1. Aspect ratio signal
+        if ratio < self.passport_min_ratio:
+            scores["passport"] += 5
+            evidence["passport"].append("portrait_aspect_ratio")
+        else:
+            scores["national_id"] += 5
+            scores["aadhaar"] += 5
+            scores["pan"] += 5
+            evidence["national_id"].append("landscape_aspect_ratio")
+
+        # 2. Barcode / QR signal
+        try:
+            from app.services.qr import QRAnalyzer
+            qr_result = QRAnalyzer().scan(image_bgr)
+            if qr_result and qr_result.present:
+                payload = qr_result.raw_payload or ""
+                payload_lower = payload.lower()
+                if qr_result.is_aadhaar or "<printletterbarcodedata" in payload_lower or "<?xml" in payload_lower:
+                    scores["aadhaar"] += 100
+                    evidence["aadhaar"].append("aadhaar_qr_code")
+                elif "income tax" in payload_lower or re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", payload):
+                    scores["pan"] += 100
+                    evidence["pan"].append("pan_qr_code")
+                else:
+                    scores["national_id"] += 15
+                    scores["aadhaar"] += 15
+                    scores["pan"] += 15
+                    evidence["national_id"].append("generic_qr_code")
+        except Exception:
+            pass
+
+        # 3. Optical Character Recognition (OCR) signal
+        try:
+            ocr_text = pytesseract.image_to_string(image_bgr) or ""
+        except pytesseract.TesseractNotFoundError:
+            ocr_text = ""
+        except Exception:
+            ocr_error = True
+            ocr_text = ""
+
+        if ocr_text:
+            text_upper = ocr_text.upper()
+            lines = [l.strip() for l in text_upper.splitlines() if l.strip()]
+
+            # Passport checks
+            for line in lines:
+                if line.startswith("P<") or "P<" in line:
+                    scores["passport"] += 60
+                    evidence["passport"].append("td3_mrz_p_prefix")
+                    break
+                if len(line) >= 35 and "<<" in line:
+                    scores["passport"] += 30
+                    evidence["passport"].append("td3_filler_characters")
+                    break
+            for kw in ["PASSPORT", "REPUBLIC OF", "TRAVEL DOCUMENT"]:
+                if kw in text_upper:
+                    scores["passport"] += 40
+                    evidence["passport"].append(f"passport_keyword_{kw}")
+
+            # National ID checks
+            for line in lines:
+                if (line.startswith(("I", "A", "C")) and len(line) in (29, 30)) or (len(line) == 30 and "<<" in line):
+                    scores["national_id"] += 50
+                    evidence["national_id"].append("td1_mrz_prefix")
+                    break
+            for kw in ["IDENTITY CARD", "NATIONAL IDENTITY", "IDENTITY DOCUMENT"]:
+                if kw in text_upper:
+                    scores["national_id"] += 40
+                    evidence["national_id"].append(f"national_id_keyword_{kw}")
+
+            # Aadhaar checks
+            aadhaar_anchors = [
+                "GOVERNMENT OF INDIA", "GOVT OF INDIA", "BHARAT SARKAR",
+                "UNIQUE IDENTIFICATION", "UIDAI", "MERA AADHAAR",
+                "ENROLMENT NO", "HELP@UIDAI"
+            ]
+            for anchor in aadhaar_anchors:
+                if anchor in text_upper:
+                    scores["aadhaar"] += 35
+                    evidence["aadhaar"].append(f"aadhaar_anchor_{anchor}")
+
+            if re.search(r"\b\d{4}\s\d{4}\s\d{4}\b", text_upper) or re.search(r"\b\d{12}\b", text_upper):
+                scores["aadhaar"] += 35
+                evidence["aadhaar"].append("aadhaar_uid_pattern")
+
+            # PAN checks
+            pan_anchors = [
+                "INCOME TAX DEPARTMENT", "GOVT. OF INDIA", "PERMANENT ACCOUNT NUMBER",
+                "FATHER'S NAME", "SIGNATURE"
+            ]
+            for anchor in pan_anchors:
+                if anchor in text_upper:
+                    scores["pan"] += 40
+                    evidence["pan"].append(f"pan_anchor_{anchor}")
+
+            if re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", text_upper):
+                scores["pan"] += 50
+                evidence["pan"].append("pan_pattern_match")
+
+        return scores, evidence, ocr_error
+
     def parser_for(self, document_type: str = "auto",
                    image_bgr: Optional[np.ndarray] = None) -> BaseDocumentParser:
-        """Resolve a parser from an explicit type or ``auto`` aspect ratio."""
+        """Resolve a parser from an explicit type or multi-signal auto routing."""
         key = self.resolve(document_type)
         if key != "auto":
             return self._ensure_parser(key)
-        if image_bgr is not None and image_bgr.size \
-                and image_bgr.shape[0] > 0 and image_bgr.shape[1] > 0:
-            for k in ["passport", "national_id"]:
-                p = self._ensure_parser(k)
-                if p.can_parse(image_bgr):
-                    return p
-        return self._ensure_parser("passport")  # default to the classic path
+        if image_bgr is None or image_bgr.size == 0 or image_bgr.shape[0] == 0:
+            return self._ensure_parser("passport")  # backward-compatible default when no image
+
+        scores, evidence, ocr_error = self.score_evidence(image_bgr)
+        if ocr_error:
+            # Fallback safely to passport when OCR runtime throws an unexpected exception
+            return self._ensure_parser("passport")
+
+        best_key, best_score = max(scores.items(), key=lambda item: item[1])
+        if best_score < 20:
+            # Ambiguous or blank image: does not meet minimum evidence threshold
+            return self._ensure_parser("unknown")
+
+        return self._ensure_parser(best_key)
 
     def select(self, image_bytes: bytes, document_type: str = "auto") -> BaseDocumentParser:
         image_bgr = _decode_bgr(image_bytes)

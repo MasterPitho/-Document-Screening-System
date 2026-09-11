@@ -4,9 +4,10 @@ Pydantic response/request schemas for the screening API.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FaceVerificationResult(BaseModel):
@@ -23,17 +24,30 @@ class FaceVerificationResult(BaseModel):
     module_state: str = "NOT_AVAILABLE"
 
 
-class MRZValidationResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
+class PrivacySafeMRZResult(BaseModel):
+    """Zero-PII MRZ verification response schema.
+
+    Exposes structural validity and verification outcomes only. Never returns
+    names, passport/document numbers, birth dates, nationality, or raw lines.
+    """
+    model_config = ConfigDict(extra="ignore")
     detected: bool
-    source: str
+    valid: bool = False
     status: str = "NOT_DETECTED"
-    confidence: float = 0.0
-    line1: Optional[str] = None
-    line2: Optional[str] = None
-    data: Optional[dict[str, Any]] = None
-    error: Optional[str] = None
+    source: str = "none"
+    document_type: str = "UNKNOWN"
+    checksum_valid: bool = False
+    format_valid: bool = False
+    fields_detected: int = 0
+    issues: list[str] = Field(default_factory=list)
     module_state: str = "NOT_AVAILABLE"
+    confidence: float = 0.0
+
+
+class MRZValidationResult(PrivacySafeMRZResult):
+    """Backward-compatible alias for privacy-safe MRZ results."""
+    pass
+
 
 
 class TamperingResult(BaseModel):
@@ -90,6 +104,7 @@ LivenessResult = LivenessResultSchema  # backward-compatible alias
 
 
 class RiskAssessment(BaseModel):
+    model_config = ConfigDict(extra="allow")
     score: int = Field(ge=0, le=100)
     status: str
     level: str
@@ -97,7 +112,8 @@ class RiskAssessment(BaseModel):
     factors: list[dict[str, Any]]
     reasons: list[str]
     module_statuses: dict[str, str]
-    confidence: float
+    risk_normalized: float
+    confidence: Optional[float] = None
     explanation: str
 
 
@@ -196,6 +212,23 @@ class DashboardTrendResponse(BaseModel):
 class DecisionUpdateRequest(BaseModel):
     decision: str                     # "CLEARED", "REVIEW", "HOLD", "SECONDARY_INSPECTION"
     notes: Optional[str] = None
+    review_notes: Optional[str] = None
+
+    @field_validator("notes", "review_notes")
+    @classmethod
+    def validate_no_pii_in_notes(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return v
+        # 12-digit Aadhaar pattern (continuous or 4-4-4)
+        if re.search(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b", v):
+            raise ValueError("Notes cannot contain sensitive Aadhaar identity numbers (PII protection).")
+        # 10-char PAN pattern
+        if re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", v):
+            raise ValueError("Notes cannot contain sensitive PAN card numbers (PII protection).")
+        # 16-digit payment card numbers
+        if re.search(r"\b(?:\d{4}[-\s]?){3}\d{4}\b", v):
+            raise ValueError("Notes cannot contain payment card numbers (PII protection).")
+        return v
 
 
 class NotificationItem(BaseModel):
@@ -213,6 +246,8 @@ class WatchlistItem(BaseModel):
     reason: str
     severity: str
     created_at: str
+    is_demo_data: bool = True
+    source: str = "DEMO_DATA_NOT_FOR_OPERATIONAL_USE"
 
 
 class ScreeningFactorOut(BaseModel):

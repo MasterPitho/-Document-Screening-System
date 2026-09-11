@@ -17,7 +17,7 @@ from app.db.models import Screening, ScreeningFactor, AuditLog, Base
 
 
 VALID_LINE1 = "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<"
-UNEXPIRED_LINE2 = "L898902C36UTO7408122F3501019ZE184226B<<<<<10"
+UNEXPIRED_LINE2 = "L898902C36UTO7408122F3501014ZE184226B<<<<<16"
 
 
 def _jpeg() -> bytes:
@@ -112,3 +112,90 @@ def test_screen_persists_no_pii_in_database(app_and_client):
     assert "applicant_name" not in payload
     assert "document_number" not in payload
     assert "country_code" not in payload
+
+
+def test_screen_response_contains_no_raw_pii(app_and_client):
+    """The /api/v1/screen response must NEVER leak raw names, MRZ lines, or document numbers."""
+    app, client = app_and_client
+    token = _auth_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = client.post(
+        "/api/v1/screen",
+        files={"document_image": ("passport.jpg", _jpeg(), "image/jpeg")},
+        data={"mrz_line1": VALID_LINE1, "mrz_line2": UNEXPIRED_LINE2},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    resp_text = resp.text
+
+    # Raw PII from MRZ input must not appear anywhere in the response JSON
+    assert "ERIKSSON" not in resp_text
+    assert "ANNA" not in resp_text
+    assert "MARIA" not in resp_text
+    assert "L898902C3" not in resp_text
+    assert VALID_LINE1 not in resp_text
+    assert UNEXPIRED_LINE2 not in resp_text
+
+    # Verify mrz structure is privacy-safe
+    mrz = body["mrz"]
+    assert "line1" not in mrz
+    assert "line2" not in mrz
+    assert "data" not in mrz
+    assert mrz["detected"] is True
+    assert mrz["valid"] is True
+    assert "document_type" in mrz
+
+
+def test_notes_cannot_contain_raw_pii(app_and_client):
+    """Attempting to patch a screening with Aadhaar or PAN in notes must fail validation."""
+    app, client = app_and_client
+    token = _auth_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Create a screening
+    repo = app.state.screening_repo
+    rec = repo.create(
+        request_id="priv-notes-001",
+        processing_time_ms=100,
+        document_type="PASSPORT",
+        mrz_status="VALID",
+        face_status="MATCH",
+        face_similarity=0.9,
+        tampering_status="CLEAN",
+        tampering_score=0.1,
+        risk_score=20,
+        risk_level="LOW_RISK",
+        decision="CLEARED",
+        status_color="GREEN",
+        module_states={},
+        factor_list=[],
+        mrz_source="ocr",
+    )
+
+    # 1. 12-digit Aadhaar in notes
+    bad_aadhaar_resp = client.patch(
+        f"/api/v1/screenings/{rec.id}/decision",
+        json={"decision": "CLEARED", "notes": "Suspect Aadhaar is 5489 1234 5678 verify manually"},
+        headers=headers,
+    )
+    assert bad_aadhaar_resp.status_code == 422
+
+    # 2. PAN in review_notes
+    bad_pan_resp = client.patch(
+        f"/api/v1/screenings/{rec.id}/decision",
+        json={"decision": "CLEARED", "review_notes": "Associated PAN is ABCDE1234F"},
+        headers=headers,
+    )
+    assert bad_pan_resp.status_code == 422
+
+    # 3. Clean operational notes should succeed
+    good_resp = client.patch(
+        f"/api/v1/screenings/{rec.id}/decision",
+        json={"decision": "CLEARED", "notes": "Document inspected visually under UV light. Clean."},
+        headers=headers,
+    )
+    assert good_resp.status_code == 200
+
+

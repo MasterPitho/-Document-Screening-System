@@ -90,11 +90,16 @@ class Settings:
     risk_reject_threshold: int
 
     # Auth / DB
+    dev_bootstrap: bool
     auth_token_ttl_hours: int
     admin_username: str
     admin_email: str
     admin_password: str
     database_url: str
+
+    # Rate limiting & resource protection
+    screening_rate_limit_per_minute: int
+    max_concurrent_screenings: int
 
     # DB startup behaviour (PostgreSQL bring-up is not instant)
     db_connect_timeout: int
@@ -177,11 +182,14 @@ class Settings:
                 _int_value("RISK_HIGH_THRESHOLD", 65),
             ),
             risk_weights=default_weights,
+            dev_bootstrap=_bool_value("DEV_BOOTSTRAP", False),
             auth_token_ttl_hours=_int_value("AUTH_TOKEN_TTL_HOURS", 24),
             admin_username=os.getenv("ADMIN_USERNAME", "").strip(),
             admin_email=os.getenv("ADMIN_EMAIL", "").strip(),
             admin_password=os.getenv("ADMIN_PASSWORD", "").strip(),
             database_url=os.getenv("DATABASE_URL", "sqlite:///./document_screening.db").strip(),
+            screening_rate_limit_per_minute=_int_value("SCREENING_RATE_LIMIT_PER_MINUTE", 60),
+            max_concurrent_screenings=_int_value("MAX_CONCURRENT_SCREENINGS", 10),
             db_connect_timeout=_int_value("DB_CONNECT_TIMEOUT", 5),
             db_connect_retries=_int_value("DB_CONNECT_RETRIES", 5),
             db_retry_delay=_float_value("DB_RETRY_DELAY", 1.0),

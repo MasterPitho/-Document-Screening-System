@@ -90,19 +90,39 @@ def test_td1_expiry_uses_pivot_year():
 
 
 def test_parser_aliases_cover_api_document_types():
-    assert set(PARSER_ALIASES) == {"td3", "passport", "td1", "national_id", "aadhaar", "pan"}
+    assert set(PARSER_ALIASES) >= {"td3", "passport", "td1", "national_id", "aadhaar", "pan"}
 
 
-def test_router_selects_passport_by_portrait_ratio():
+def test_router_ambiguous_blank_image_returns_unknown():
     router = DocumentParserRouter()
-    portrait = _jpeg(width=400, height=600)  # ratio ~0.67 < 1.45
-    assert router.select(portrait).name == "passport"
+    portrait_blank = _jpeg(width=400, height=600)
+    landscape_blank = _jpeg(width=400, height=250)
+    assert router.select(portrait_blank).name == "unknown"
+    assert router.select(landscape_blank).name == "unknown"
 
 
-def test_router_selects_national_id_by_landscape_ratio():
+def test_router_auto_routes_passport_with_mrz_evidence(monkeypatch):
     router = DocumentParserRouter()
-    landscape = _jpeg(width=400, height=250)  # ratio 1.6 >= 1.45
-    assert router.select(landscape).name == "national_id"
+    mrz_text = (
+        "P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<\n"
+        "L898902C36UTO7408122F3501014ZE184226B<<<<<16"
+    )
+    monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: mrz_text)
+    assert router.select(_jpeg(width=400, height=600)).name == "passport"
+
+
+def test_router_auto_routes_aadhaar_with_text_evidence(monkeypatch):
+    router = DocumentParserRouter()
+    aadhaar_text = "Government of India\nUnique Identification Authority of India\nUIDAI\n2345 6789 0123"
+    monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: aadhaar_text)
+    assert router.select(_jpeg(width=400, height=250)).name == "aadhaar"
+
+
+def test_router_auto_routes_pan_with_text_evidence(monkeypatch):
+    router = DocumentParserRouter()
+    pan_text = "INCOME TAX DEPARTMENT\nGOVT. OF INDIA\nPERMANENT ACCOUNT NUMBER\nABCDE1234F"
+    monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: pan_text)
+    assert router.select(_jpeg(width=400, height=250)).name == "pan"
 
 
 def test_router_respects_explicit_document_type():
@@ -127,24 +147,16 @@ def test_router_defaults_to_passport_on_unreadable_bytes():
     assert router.select(b"not-an-image").name == "passport"
 
 
-def test_extract_auto_portrait_routes_to_passport(monkeypatch):
+def test_extract_auto_blank_image_returns_unknown_and_not_detected(monkeypatch):
     monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: "")
     result = mrz_mod.extract_mrz_from_image(_jpeg(width=400, height=600), _settings())
-    assert result["format"] == "TD3"
-    assert result["document_type"] == "PASSPORT"
+    assert result["format"] == "UNKNOWN"
+    assert result["document_type"] == "UNKNOWN"
     assert result["detected"] is False
+    assert result["status"] == "NOT_DETECTED"
 
 
-def test_extract_auto_landscape_routes_to_national_id(monkeypatch):
-    monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: "")
-    result = mrz_mod.extract_mrz_from_image(_jpeg(width=400, height=250), _settings())
-    assert result["format"] == "TD1"
-    assert result["document_type"] == "NATIONAL_ID"
-    assert result["detected"] is False
-    assert result["qr_present"] is False
-
-
-def test_extract_explicit_document_type_overrides_ratio(monkeypatch):
+def test_extract_explicit_document_type_overrides_blank(monkeypatch):
     monkeypatch.setattr(mrz_mod.pytesseract, "image_to_string", lambda *a, **k: "")
     landscape = _jpeg(width=400, height=250)
     result = mrz_mod.extract_mrz_from_image(
@@ -195,8 +207,8 @@ def test_factory_explicit_types():
 def test_factory_auto_routes_by_image_and_defaults_to_passport():
     portrait = np.asarray(Image.open(io.BytesIO(_jpeg(width=400, height=600))))
     landscape = np.asarray(Image.open(io.BytesIO(_jpeg(width=400, height=250))))
-    assert mrz_mod.get_document_parser("auto", portrait).name == "passport"
-    assert mrz_mod.get_document_parser("auto", landscape).name == "national_id"
+    assert mrz_mod.get_document_parser("auto", portrait).name == "unknown"
+    assert mrz_mod.get_document_parser("auto", landscape).name == "unknown"
     assert mrz_mod.get_document_parser("auto").name == "passport"
     assert mrz_mod.get_document_parser().name == "passport"
 

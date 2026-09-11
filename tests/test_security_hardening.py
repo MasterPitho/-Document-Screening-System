@@ -27,7 +27,26 @@ def _png_bytes(width=100, height=100):
 
 @pytest.fixture
 def client():
-    return TestClient(create_app())
+    app = create_app()
+    import uuid
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    user = app.state.user_repo.create(
+        username=f"sec_officer_{uuid.uuid4().hex[:8]}",
+        email=f"sec_{uuid.uuid4().hex[:8]}@agency.gov",
+        full_name="Security Officer",
+        role="officer",
+        password_hash="testhash",
+    )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 def test_path_traversal_filename_safe(client):
@@ -105,3 +124,126 @@ def test_model_manager_single_load_lifecycle():
     inst2 = ModelManager.get_instance()
     assert inst1 is inst2
     ModelManager._instance = None
+
+
+def test_default_credentials_disabled_by_default(tmp_path, monkeypatch):
+    """By default, predictable default credentials are NOT created in the database."""
+    from app.api.auth import bootstrap_admin
+    from app.db.database import Database
+    from app.db.repositories import UserRepository
+
+    db = Database(f"sqlite:///{(tmp_path / 'nobootstrap.db').as_posix()}")
+    db.create_all()
+    settings = Settings.from_env()
+
+    bootstrap_admin(db, settings)
+    repo = UserRepository(db)
+    assert repo.get_by_username("officer") is None
+    assert repo.get_by_username("LT-04") is None
+
+
+def test_default_credentials_blocked_in_production(tmp_path, monkeypatch):
+    """Even if DEV_BOOTSTRAP=true, production environment never creates default officer."""
+    from app.api.auth import bootstrap_admin
+    from app.db.database import Database
+    from app.db.repositories import UserRepository
+
+    monkeypatch.setenv("DEV_BOOTSTRAP", "true")
+    monkeypatch.setenv("API_ENV", "production")
+    settings = Settings.from_env()
+
+    db = Database(f"sqlite:///{(tmp_path / 'prodbootstrap.db').as_posix()}")
+    db.create_all()
+    bootstrap_admin(db, settings)
+    repo = UserRepository(db)
+    assert repo.get_by_username("officer") is None
+    assert repo.get_by_username("LT-04") is None
+
+
+def test_anonymous_screen_request_returns_401():
+    """Unauthenticated calls to /api/v1/screen must be rejected with 401."""
+    app = create_app()
+    unauth_client = TestClient(app)
+    response = unauth_client.post(
+        "/api/v1/screen",
+        files={"document_image": ("doc.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert response.status_code == 401
+
+
+def test_screening_rate_limit_exceeded_returns_429():
+    """Exceeding screening rate limit per minute must return HTTP 429 with Retry-After header."""
+    import uuid
+    from dataclasses import replace
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    settings = replace(Settings.from_env(), screening_rate_limit_per_minute=2)
+    app = create_app(settings=settings)
+    user = app.state.user_repo.create(
+        username=f"rate_officer_{uuid.uuid4().hex[:8]}",
+        email=f"rate_{uuid.uuid4().hex[:8]}@agency.gov",
+        full_name="Rate Officer",
+        role="officer",
+        password_hash="testhash",
+    )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
+    client = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+    # Request 1: success
+    r1 = client.post("/api/v1/screen", files={"document_image": ("d1.jpg", _jpeg_bytes(), "image/jpeg")})
+    assert r1.status_code == 200
+    # Request 2: success
+    r2 = client.post("/api/v1/screen", files={"document_image": ("d2.jpg", _jpeg_bytes(), "image/jpeg")})
+    assert r2.status_code == 200
+    # Request 3: rate limit exceeded (429)
+    r3 = client.post("/api/v1/screen", files={"document_image": ("d3.jpg", _jpeg_bytes(), "image/jpeg")})
+    assert r3.status_code == 429
+    assert "Retry-After" in r3.headers
+
+
+def test_screening_concurrency_capacity_reached_returns_429():
+    """When engine capacity is exhausted, immediately return HTTP 429 without queueing indefinitely."""
+    import asyncio
+    import uuid
+    from dataclasses import replace
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    settings = replace(Settings.from_env(), max_concurrent_screenings=1)
+    app = create_app(settings=settings)
+    user = app.state.user_repo.create(
+        username=f"conc_officer_{uuid.uuid4().hex[:8]}",
+        email=f"conc_{uuid.uuid4().hex[:8]}@agency.gov",
+        full_name="Conc Officer",
+        role="officer",
+        password_hash="testhash",
+    )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
+    client = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+    # Exhaust concurrency semaphore
+    limiter = app.state.resource_limiter
+    asyncio.run(limiter.acquire_slot())
+
+    try:
+        response = client.post("/api/v1/screen", files={"document_image": ("doc.jpg", _jpeg_bytes(), "image/jpeg")})
+        assert response.status_code == 429
+        assert "capacity reached" in response.json()["error"]["message"].lower()
+        assert "Retry-After" in response.headers
+    finally:
+        limiter.release_slot()
+
+

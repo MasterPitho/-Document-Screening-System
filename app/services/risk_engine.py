@@ -235,6 +235,7 @@ class RiskEngine:
             "factors": factors,
             "reasons": reasons,
             "module_statuses": module_statuses,
+            "risk_normalized": round(max(0.0, min(1.0, risk_score / 100.0)), 3),
             "confidence": round(max(0.0, min(1.0, risk_score / 100.0)), 3),
             "explanation": (
                 "Deterministic weighted sum of activated risk factors, bounded 0-100. "

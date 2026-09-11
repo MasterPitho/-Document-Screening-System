@@ -30,9 +30,9 @@ Screen a physical identity document through **multi-modal triage** — a machine
 
 - **TD3 Passports (ICAO 9303):** Two 44-character MRZ lines, OCR candidate filtering, 7-3-1 check digits, impossible-date & pivot-year expiry validation.
 - **TD1 National Identity Cards (ICAO 9303):** Three 30-character MRZ lines, check digits, and structural layout.
-- **Aadhaar Cards (UIDAI):** Dedicated layout anchor detection, Verhoeff checksum algorithm on 12-digit UID numbers, masked identity representation (`XXXX-XXXX-1234`), and embedded QR payload parsing.
+- **Aadhaar Cards (UIDAI):** Dedicated layout anchor detection, Verhoeff checksum algorithm on 12-digit UID numbers, masked identity representation (`XXXX-XXXX-1234`), and embedded QR payload parsing. **Disclaimer:** Aadhaar screening verifies structural validity (`STRUCTURALLY_VALID`) only via Verhoeff checksum and layout anchors; it does not connect to UIDAI servers, query CIDR or e-KYC databases, and does not claim official government authentication.
 - **PAN Cards (Income Tax Dept of India):** Dedicated 10-character alphanumeric regex (`[A-Z]{5}[0-9]{4}[A-Z]`), 4th character entity type validation (`P`=Individual, `C`=Company, `H`=HUF, `F`=Firm, `A`=AOP, etc.), masked identity (`ABCPXXXX4F`), and anchor recognition.
-- **Router Contract:** Parser is selected either by explicit `document_type` (`auto | td3 | passport | td1 | national_id | aadhaar | pan`) or, in `auto` mode, by document aspect ratio and layout anchors. Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through `BaseDocumentParser`.
+- **Router Contract:** Multi-signal evidence-based auto routing. Parser is selected either by explicit `document_type` (`auto | td3 | passport | td1 | national_id | aadhaar | pan`) or, in `auto` mode, by a multi-factor evidence score combining visual aspect ratio, QR signatures, and OCR text/anchors. If evidence is ambiguous or no identity anchors are detected (e.g. blank/noise images), the router safely falls back to `UNKNOWN` document type and `NOT_DETECTED` status. Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through `BaseDocumentParser`.
 
 ### 1e. Security Boundaries
 
@@ -216,6 +216,9 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `screening` | Used by `docker-compose.yml`; must match the credentials in `DATABASE_URL`. |
 | `AUTH_TOKEN_TTL_HOURS` | `24` | Bearer token lifetime in hours. |
 | `ADMIN_USERNAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | _(unset)_ | When all three are set, an admin account is created at startup. |
+| `DEV_BOOTSTRAP` | `false` | When `true`, enables hardcoded fallback admin development credentials (`admin` / `Admin@12345`). Strictly disabled in production. |
+| `SCREENING_RATE_LIMIT_PER_MINUTE` | `60` | Max screening requests allowed per client IP per minute. Returns HTTP 429 when exceeded. |
+| `MAX_CONCURRENT_SCREENINGS` | `4` | Max simultaneous screening operations allowed in flight. Returns HTTP 429 when capacity is reached. |
 
 Risk weights are intentionally heuristic prototype values and should be calibrated against labeled data before any operational use. The engine rejects unknown risk factors at runtime rather than silently assigning them a weight.
 
@@ -229,7 +232,14 @@ Returns `{"status": "ok", "service": "Document Screening Engine", "env": "<API_E
 
 Returns `200 {"status": "ready", "modules": {...}}` only when the face model is loaded **and** the database answers `SELECT 1`; otherwise `503` with `face_recognition`/`database` set to `false`. This is the deployment liveness/readiness probe.
 
-### `POST /api/v1/screen`
+### `POST /api/v1/screen` (Bearer Token Required)
+
+Mandatory authentication: All screening requests require an authenticated operator session via `Authorization: Bearer <token>` (obtained via `/api/v1/auth/login`). Unauthenticated requests return `401 UNAUTHORIZED`.
+
+Concurrency & Rate Limiting:
+- Per-client rate limit (`SCREENING_RATE_LIMIT_PER_MINUTE`, default 60 requests/min).
+- Global screening concurrency limit (`MAX_CONCURRENT_SCREENINGS`, default 4 concurrent evaluations).
+- Exceeding either limit immediately returns `429 TOO_MANY_REQUESTS` with a standard `Retry-After` header.
 
 Multipart form fields:
 
@@ -237,34 +247,33 @@ Multipart form fields:
 - `live_photo`: optional JPG, PNG, or WebP live image.
 - `mrz_line1`: optional exact TD3 line 1 (passport MRZ form path).
 - `mrz_line2`: optional exact TD3 line 2 (passport MRZ form path).
-- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`, `aadhaar`, `pan`. When `auto`, the parser is chosen by document aspect ratio and layout anchor detection.
+- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`, `aadhaar`, `pan`. When `auto`, multi-signal evidence scoring evaluates visual aspect ratio, QR signatures, and OCR anchors. If anchors are absent or ambiguous (blank/noise images), it falls back safely to `UNKNOWN` document type and `NOT_DETECTED` status.
 
 Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td1|national_id|aadhaar|pan` returns HTTP 422.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/screen \
+  -H "Authorization: Bearer <token>" \
+  -H "X-Request-ID: my-correlation-id" \
   -F "document_image=@passport.jpg" \
-  -F "live_photo=@face.jpg" \
-  -H "X-Request-ID: my-correlation-id"
+  -F "live_photo=@face.jpg"
 ```
 
 A successful MRZ detection (`detected: true`, `status: VALID`) requires two exact 44-character lines passing allowed-character validation, TD3 structure validation, every ICAO 9303 check digit, and date validation. Candidates with wrong lengths are rejected; checksum-invalid or invalid-date candidates are never reported as detections.
+
+**Zero PII in Public Response:** The returned `mrz` block uses `PrivacySafeMRZResult`, returning only `detected`, `status`, `format`, `source`, `confidence`, `module_state`, `masked_identifier`, `country_code`, and `valid_lines`. Raw MRZ strings, full identity numbers, names, birth dates, and expiration dates are scrubbed from all API outputs.
 
 `X-Request-ID` is optional, sanitized to ≤64 alphanumeric/`-`/`_`/`.` characters, echoed in the response header, and written into the response body and audit record. Reusing the same `X-Request-ID` returns `409 CONFLICT` so correlators stay unambiguous.
 
 On success the 200 body includes a `persistence` field: `{"status": "stored", "screening_id": <id>}`. If persist fails intermittently the endpoint returns a `503 DATABASE_UNAVAILABLE` error — the analysis itself is never reported as a recorded `CLEARED` result when it could not be stored, and it is never retried silently under the same `request_id`.
 
-### `POST /api/v1/screen` — with authenticated operator
-
-If the request carries a valid `Authorization: Bearer <token>` header, the screening is attributed to that operator in the audit trail. Without a header the scan still works and is recorded as anonymous. An invalid token is ignored for screening purposes (screening never fails because of a stale token).
-
 ### Operator accounts & RBAC
 
 ```bash
-# Register (roles: "officer", "supervisor", "admin")
+# Register (new public registrations are strictly assigned "officer" role)
 curl -X POST http://localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username": "officer01", "email": "officer01@example.com", "full_name": "A. Officer", "password": "SuperSecret123!", "role": "officer"}'
+  -d '{"username": "officer01", "email": "officer01@example.com", "full_name": "A. Officer", "password": "SuperSecret123!"}'
 
 # Login -> bearer token
 curl -X POST http://localhost:8000/api/v1/auth/login \
@@ -275,18 +284,21 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 
 Endpoints:
 
-- `POST /api/v1/auth/register` — create an operator account (201). Supports `role` assignment (`officer`, `supervisor`, `admin`).
+- `POST /api/v1/auth/register` — create an operator account (201). Role is strictly enforced to `officer` to prevent privilege escalation.
 - `POST /api/v1/auth/login` — returns a bearer token.
 - `POST /api/v1/auth/logout` — revokes the current token.
 - `GET /api/v1/auth/me` — current user profile.
 
 ### Screening history, reports & decision override (bearer token required)
 
-- `GET /api/v1/screenings?limit=20&offset=0&decision=...&risk_level=...&date_from=...&date_to=...` — list audit records (newest first) with optional `decision`, `risk_level`, and naive-UTC `date_from`/`date_to` filters.
+- `GET /api/v1/screenings?limit=20&offset=0&decision=...&risk_level=...&date_from=...&date_to=...` — list audit records (newest first). **Role-scoped**: `officer` accounts can only access screenings they performed (`user_id == current_user.id`); `supervisor` and `admin` accounts have global visibility across all screenings.
 - `GET /api/v1/screenings/{id_or_request_id}` — single audit record; accepts either the integer row id or the 32-character `request_id`.
-- `PATCH /api/v1/screenings/{item_id}/decision` — human-in-the-loop decision override (requires `officer`, `supervisor`, or `admin` role). Accepts `{"decision": "CLEARED" | "SECONDARY_INSPECTION_REQUIRED" | "HIGH_RISK_REVIEW_REQUIRED", "review_notes": "..."}`.
+- `PATCH /api/v1/screenings/{item_id}/decision` — human-in-the-loop decision override (requires `officer`, `supervisor`, or `admin` role). Accepts `{"decision": "CLEARED" | "SECONDARY_INSPECTION_REQUIRED" | "HIGH_RISK_REVIEW_REQUIRED", "review_notes": "..."}`. Review notes strictly reject raw PII (12-digit Aadhaar, PAN, or credit card numbers).
 - `GET /api/v1/screenings/{id_or_request_id}/factors` — the normalized risk-factor rows (name, severity, weight, description) for one screening.
 - `GET /api/v1/stats` — dashboard counts: totals, cleared, secondary inspection, high risk, MRZ failures, face mismatches, suspicious tampering, plus breakdowns by decision and risk level.
+- `GET /api/v1/stats/trend` — daily trend statistics (bearer token required).
+- `GET /api/v1/notifications` — system notifications (bearer token required).
+- `GET /api/v1/watchlists` — watchlist items flagged with `is_demo_data: true` (bearer token required).
 - `GET /api/v1/report/summary` — totals per risk level and decision, cleared/secondary/high-risk counts, and average processing time.
 
 ```bash
@@ -305,6 +317,7 @@ A successful screening returns HTTP 200 with a heuristic, human-review verdict:
   "request_id": "b7f4d1c7b6f54f9e9c2be6ccf7f1e2a1",
   "risk_assessment": {
     "score": 20,
+    "risk_normalized": 0.20,
     "status": "YELLOW",
     "level": "LOW_RISK",
     "decision": "SECONDARY_INSPECTION_REQUIRED",
@@ -313,8 +326,16 @@ A successful screening returns HTTP 200 with a heuristic, human-review verdict:
     "module_statuses": {"mrz": "REVIEW", "face": "NOT_AVAILABLE", "tampering": "PASS"},
     "explanation": "..."
   },
-  "mrz": {"detected": false, "source": "ocr", "status": "NOT_DETECTED", "confidence": 0.0,
-          "module_state": "REVIEW"},
+  "mrz": {
+    "detected": false,
+    "source": "ocr",
+    "status": "NOT_DETECTED",
+    "confidence": 0.0,
+    "module_state": "REVIEW",
+    "masked_identifier": null,
+    "country_code": null,
+    "valid_lines": 0
+  },
   "tampering_analysis": {"status": "CLEAN", "score": 0.0, "confidence": 0.0,
                          "signals": {"ela": {...}, "compression": {...}, "noise": {...},
                                      "edge": {...}, "copy_move": {...}, "metadata": {...}},
@@ -352,21 +373,23 @@ All non-2xx responses share a structured shape and never expose stack traces, fi
 }
 ```
 
-Error codes: `BAD_REQUEST` (400), `NOT_FOUND` (404), `UNPROCESSABLE_ENTITY`/`VALIDATION_ERROR` (422), `FILE_TOO_LARGE` (413), `UNSUPPORTED_MEDIA_TYPE` (415), `CONFLICT` (409), `UNAUTHORIZED`/`FORBIDDEN` (401/403), `DATABASE_UNAVAILABLE` (503), `INTERNAL_ERROR` (500).
+Error codes: `BAD_REQUEST` (400), `NOT_FOUND` (404), `UNPROCESSABLE_ENTITY`/`VALIDATION_ERROR` (422), `FILE_TOO_LARGE` (413), `UNSUPPORTED_MEDIA_TYPE` (415), `CONFLICT` (409), `UNAUTHORIZED`/`FORBIDDEN` (401/403), `TOO_MANY_REQUESTS` (429 - includes `Retry-After` header), `DATABASE_UNAVAILABLE` (503), `INTERNAL_ERROR` (500).
 
-## Testing
+## Testing & CI
+
+Continuous Integration is automated via GitHub Actions (`.github/workflows/tests.yml`), running the test suite on every push and pull request against Python 3.11.
 
 ```bash
 pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The comprehensive test suite (**220 tests, 100% pass rate**) covers:
+The comprehensive test suite (**238 tests, 100% pass rate**) covers:
 - **Aadhaar & PAN Parsing:** Verhoeff checksum validation, layout anchors, masked UID/PAN format validation (`tests/test_aadhaar_screening.py`, `tests/test_pan_screening.py`).
 - **QR Code Analysis:** Embedded QR extraction, adaptive preprocessing, payload classification, and masked summaries (`tests/test_qr_analysis.py`).
 - **Cross-Signal Consistency:** Document type mismatch, QR vs OCR conflict, spatial tampering overlap (`tests/test_cross_signal.py`).
-- **Security & RBAC:** Role-based access control (`tests/test_rbac.py`), CORS origin lockdown (`tests/test_cors_security.py`), upload security, path traversal filename protection, decompression bomb prevention, and model lifecycle (`tests/test_security_hardening.py`).
-- **Zero-PII Compliance:** Verification that database tables, schemas, repositories, and audit logs never persist raw names, document numbers, MRZ strings, face embeddings, or images (`tests/test_privacy_compliance.py`, `tests/test_persistence.py`).
+- **Security, Rate Limiting & RBAC:** Role-based access control (`tests/test_rbac.py`), CORS origin lockdown (`tests/test_cors_security.py`), upload security, path traversal filename protection, decompression bomb prevention, and concurrency/rate-limiting enforcement (`tests/test_security_hardening.py`).
+- **Zero-PII Compliance:** Verification that API endpoints, database tables, schemas, repositories, and audit logs never expose or persist raw names, document numbers, MRZ strings, face embeddings, or images (`tests/test_privacy_compliance.py`, `tests/test_persistence.py`).
 - **Core Pipeline:** TD3/TD1 MRZ parsing, 7-3-1 checksums, impossible-date & leap-year handling, Tesseract OCR candidate filtering, multi-signal tamper forensics, InsightFace ArcFace verification, passive liveness PAD (ONNX & OpenCV fallback), deterministic risk scoring, Alembic migrations & schema synchronization (`tests/test_migrations.py`), and database resilience.
 
 ## Security and Privacy

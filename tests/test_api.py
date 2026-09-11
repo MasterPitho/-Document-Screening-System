@@ -91,7 +91,35 @@ class StubLiveness:
 
 @pytest.fixture
 def client():
-    return TestClient(create_app())
+    app = create_app()
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    user = app.state.user_repo.create(
+        username=f"officer_api_{uuid.uuid4().hex[:8]}",
+        email=f"officer_{uuid.uuid4().hex[:8]}@agency.gov",
+        full_name="API Test Officer",
+        role="officer",
+        password_hash="testhash",
+    )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+
+def test_anonymous_screen_request_returns_401():
+    app = create_app()
+    unauth_client = TestClient(app)
+    response = unauth_client.post(
+        "/api/v1/screen",
+        files={"document_image": ("doc.jpg", _jpeg(), "image/jpeg")},
+    )
+    assert response.status_code == 401
 
 
 def _jpeg(width=800, height=500):
@@ -304,15 +332,35 @@ def _screen_app(face_backend=None, tampering_result=None, liveness_result=None):
 
 
 def _post_screen(app, *, live=False, data=None, headers=None):
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    user = app.state.user_repo.get_by_username("test_officer")
+    if not user:
+        user = app.state.user_repo.create(
+            username="test_officer",
+            email="test_officer@agency.gov",
+            full_name="Test Officer",
+            role="officer",
+            password_hash="testhash",
+        )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
     client = TestClient(app)
     files = {"document_image": ("doc.jpg", _jpeg(), "image/jpeg")}
     if live:
         files["live_photo"] = ("live.jpg", _jpeg(), "image/jpeg")
-    if headers is None:
-        headers = {"X-Request-ID": f"screen-test-{uuid.uuid4().hex[:12]}"}
+    headers_dict = dict(headers or {})
+    headers_dict.setdefault("X-Request-ID", f"screen-test-{uuid.uuid4().hex[:12]}")
+    headers_dict.setdefault("Authorization", f"Bearer {token}")
     return client.post(
         "/api/v1/screen", data=data or {}, files=files,
-        headers=headers,
+        headers=headers_dict,
     )
 
 
@@ -517,7 +565,24 @@ def test_screen_internal_exception_returns_safe_500():
             raise RuntimeError("secret-internal-detail")
 
     app.state.risk_engine = _Boom()
-    client = TestClient(app, raise_server_exceptions=False)
+    from app.api.auth import _generate_token, _hash_token
+    import datetime
+    from app.db.database import utcnow_naive
+
+    user = app.state.user_repo.create(
+        username=f"officer_boom_{uuid.uuid4().hex[:8]}",
+        email=f"boom_{uuid.uuid4().hex[:8]}@agency.gov",
+        full_name="Boom Officer",
+        role="officer",
+        password_hash="testhash",
+    )
+    token = _generate_token()
+    app.state.token_repo.create(
+        user_id=user.id,
+        token_hash=_hash_token(token),
+        expires_at=utcnow_naive() + datetime.timedelta(hours=24),
+    )
+    client = TestClient(app, raise_server_exceptions=False, headers={"Authorization": f"Bearer {token}"})
     response = client.post(
         "/api/v1/screen",
         files={"document_image": ("doc.jpg", _jpeg(), "image/jpeg")},

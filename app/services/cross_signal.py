@@ -59,14 +59,33 @@ class CrossSignalEvaluator:
                 })
 
         # 2. QR vs OCR Consistency
-        qr_info = doc_result.get("qr", {})
-        doc_data = doc_result.get("data", {})
-        ocr_masked_uid = doc_data.get("masked_uid")
-        qr_masked_uid = qr_info.get("masked_uid") or qr_info.get("details", {}).get("masked_uid")
+        qr_info = doc_result.get("qr", {}) if isinstance(doc_result.get("qr"), dict) else {}
+        doc_data = doc_result.get("data", {}) if isinstance(doc_result.get("data"), dict) else {}
+        ocr_masked_uid = doc_data.get("ocr_masked_uid") or doc_data.get("masked_uid")
+        qr_masked_uid = (
+            doc_data.get("qr_masked_uid")
+            or qr_info.get("masked_uid")
+            or (qr_info.get("masked_summary", {}).get("masked_uid") if isinstance(qr_info.get("masked_summary"), dict) else None)
+            or (qr_info.get("details", {}).get("masked_uid") if isinstance(qr_info.get("details"), dict) else None)
+        )
 
-        if ocr_masked_uid and qr_masked_uid:
-            if ocr_masked_uid != qr_masked_uid:
-                msg = f"QR identity ({qr_masked_uid}) conflicts with visual text ({ocr_masked_uid})."
+        import re
+
+        def _normalize_masked(val: Optional[str]) -> Optional[str]:
+            if not val:
+                return None
+            digits = re.sub(r"\D", "", str(val))
+            if len(digits) >= 4:
+                return digits[-4:]
+            return str(val).strip().upper()
+
+        norm_ocr = _normalize_masked(ocr_masked_uid)
+        norm_qr = _normalize_masked(qr_masked_uid)
+        qr_readable = qr_info.get("readable", True)
+
+        if norm_ocr and norm_qr and qr_readable:
+            if norm_ocr != norm_qr:
+                msg = "QR identity metadata conflicts with visual document text."
                 conflicts.append(msg)
                 factors.append({
                     "factor": "QR_OCR_CONFLICT",

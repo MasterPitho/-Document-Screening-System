@@ -137,16 +137,19 @@ def bootstrap_admin(database: Database, settings: Settings) -> None:
                 password_hash=_hash_password(settings.admin_password),
             )
 
-    # 2. Default officer account for testing (Officer ID: LT-04 / password: Officer123!)
-    if repo.get_by_username("LT-04") is None and repo.get_by_username("officer") is None:
-        try:
-            repo.create(
-                username="officer",
-                email="officer@sentinel.gov",
-                full_name="Border Patrol Officer",
-                role="officer",
-                officer_id="LT-04",
-                password_hash=_hash_password("Officer123!"),
-            )
-        except Exception:  # noqa: BLE001
-            pass
+    # 2. Default officer account:
+    # ONLY created in non-production environments when DEV_BOOTSTRAP is explicitly set to true.
+    # Production environments will NEVER create predictable default credentials.
+    if settings.dev_bootstrap and settings.api_env != "production":
+        if repo.get_by_username("LT-04") is None and repo.get_by_username("officer") is None:
+            try:
+                repo.create(
+                    username="officer",
+                    email="officer@sentinel.gov",
+                    full_name="Border Patrol Officer",
+                    role="officer",
+                    officer_id="LT-04",
+                    password_hash=_hash_password("Officer123!"),
+                )
+            except Exception:  # noqa: BLE001
+                pass

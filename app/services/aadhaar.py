@@ -135,9 +135,11 @@ class AadhaarDocumentParser(BaseDocumentParser):
         ]
 
         # 4. UID Pattern & Verhoeff Analysis (Privacy: mask immediately!)
-        masked_uid, is_masked, verhoeff_valid = self._analyze_uid(ocr_text, qr_result)
+        ocr_masked_uid, is_masked, verhoeff_valid = self._analyze_ocr_uid(ocr_text)
+        qr_masked_uid = qr_result.details.get("masked_uid") if (qr_result.detected and qr_result.readable) else None
+        doc_masked_uid = ocr_masked_uid or qr_masked_uid
 
-        # 5. Evaluate authenticity and status
+        # 5. Evaluate structural validity and status (never claims official government authenticity)
         detected = (len(anchors_found) >= 2) or (qr_result.detected and qr_result.payload_type in {"AADHAAR_XML", "SECURE_AADHAAR_NUMERIC"})
         if not detected and len(anchors_found) == 0 and not qr_result.detected:
             return self._not_detected("No Aadhaar anchors or QR code detected.")
@@ -147,12 +149,12 @@ class AadhaarDocumentParser(BaseDocumentParser):
             "qr_detected": qr_result.detected,
             "qr_readable": qr_result.readable,
             "qr_aadhaar_format": qr_result.payload_type in {"AADHAAR_XML", "SECURE_AADHAAR_NUMERIC"},
-            "uid_found": bool(masked_uid),
+            "uid_found": bool(doc_masked_uid),
             "uid_is_masked": is_masked,
             "verhoeff_valid": verhoeff_valid,
         }
 
-        # Status rules
+        # Status rules - structural consistency only
         if verhoeff_valid is False:
             status = "SUSPICIOUS"
             confidence = 0.85
@@ -168,7 +170,7 @@ class AadhaarDocumentParser(BaseDocumentParser):
 
         raw_result = {
             "detected": True,
-            "source": "ocr_and_qr",
+            "source": "ocr_and_qr" if (ocr_masked_uid and qr_result.detected) else ("qr" if qr_result.detected else "ocr"),
             "status": status,
             "document_type": self.document_type,
             "format": self.format,
@@ -181,10 +183,13 @@ class AadhaarDocumentParser(BaseDocumentParser):
                 "detected": qr_result.detected,
                 "readable": qr_result.readable,
                 "payload_type": qr_result.payload_type,
+                "masked_uid": qr_masked_uid,
                 "masked_summary": qr_result.raw_payload_masked_summary,
             },
             "data": {
-                "masked_uid": masked_uid,
+                "masked_uid": doc_masked_uid,
+                "ocr_masked_uid": ocr_masked_uid,
+                "qr_masked_uid": qr_masked_uid,
                 "is_masked": is_masked,
             },
         }
@@ -200,16 +205,12 @@ class AadhaarDocumentParser(BaseDocumentParser):
             error=None,
         )
 
-    def _analyze_uid(self, ocr_text: str, qr_result: QRAnalysisResult) -> tuple[Optional[str], bool, Optional[bool]]:
-        """Search for masked or unmasked UID, validate Verhoeff without persisting raw numbers."""
+    def _analyze_ocr_uid(self, ocr_text: str) -> tuple[Optional[str], bool, Optional[bool]]:
+        """Search for masked or unmasked UID in OCR text, validate Verhoeff without persisting raw numbers."""
         # Check masked format in text: e.g. XXXX XXXX 1234 or XXXX-XXXX-1234
         masked_match = re.search(r"[X\*\•]{4}[\s\-][X\*\•]{4}[\s\-](\d{4})", ocr_text, re.IGNORECASE)
         if masked_match:
             return f"XXXX-XXXX-{masked_match.group(1)}", True, None
-
-        # Check masked UID from QR
-        if qr_result.details.get("masked_uid"):
-            return str(qr_result.details["masked_uid"]), True, None
 
         # Check unmasked 12-digit format in text (starts with digit 2-9)
         unmasked_match = re.search(r"\b([2-9]\d{3})[\s\-](\d{4})[\s\-](\d{4})\b", ocr_text)

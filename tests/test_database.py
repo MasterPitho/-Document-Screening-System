@@ -207,19 +207,12 @@ def test_screening_is_persisted_for_authenticated_user(monkeypatch):
     assert body["module_states"]["mrz"] == "REVIEW"
 
 
-def test_screening_is_persisted_for_anonymous_user(monkeypatch):
+def test_screening_requires_authentication(monkeypatch):
     monkeypatch.setattr(mrz_mod, "extract_mrz_from_image",
                         lambda doc, settings: _make_mrz_not_detected())
     client = TestClient(_app())
-    username = _unique("anon")
-    _, login = _register_and_login(client, username)
-    token = login.json()["token"]
     response = _screen_request(client)
-    assert response.status_code == 200
-    request_id = response.json()["request_id"]
-    detail = client.get(f"/api/v1/screenings/{request_id}", headers=_auth_headers(token))
-    assert detail.status_code == 200
-    assert detail.json()["user_id"] is None
+    assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +252,10 @@ def test_report_summary_rolls_up_records():
     username = _unique("report")
     _, login = _register_and_login(client, username)
     token = login.json()["token"]
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.username == username)).scalar_one()
+        user.role = "supervisor"
+        db.commit()
     summary = client.get("/api/v1/report/summary", headers=_auth_headers(token))
     assert summary.status_code == 200
     body = summary.json()

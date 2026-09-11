@@ -8,8 +8,10 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from app.api.auth import get_current_user
 from app.config import Settings
 from app.db.database import build_database
+from app.db.models import User
 from app.main import create_app
 from app.services import mrz as mrz_mod
 from app.services.face_recognition import DummyBackend, ModelManager
@@ -75,7 +77,12 @@ def test_screen_returns_503_database_unavailable(monkeypatch):
                             "detected": False, "source": "ocr",
                             "status": "NOT_DETECTED", "confidence": 0.0,
                             "module_state": "NOT_AVAILABLE"})
-    client = TestClient(_dead_app(), raise_server_exceptions=False)
+    app = _dead_app()
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1, username="officer_test", email="officer@agency.gov",
+        full_name="Officer", role="officer", password_hash="h", is_active=True
+    )
+    client = TestClient(app, raise_server_exceptions=False)
     response = client.post(
         "/api/v1/screen",
         headers={"X-Request-ID": uuid.uuid4().hex},

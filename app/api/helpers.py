@@ -38,13 +38,15 @@ _ERROR_CODES_BY_STATUS = {
     413: "FILE_TOO_LARGE",
     415: "UNSUPPORTED_MEDIA_TYPE",
     422: "VALIDATION_ERROR",
+    429: "TOO_MANY_REQUESTS",
     500: "INTERNAL_ERROR",
     503: "DATABASE_UNAVAILABLE",
 }
 
 
 def structured_error(status_code: int, message: str, detail: object = None,
-                     request_id: Optional[str] = None) -> JSONResponse:
+                     request_id: Optional[str] = None,
+                     headers: Optional[Dict[str, str]] = None) -> JSONResponse:
     code = _ERROR_CODES_BY_STATUS.get(status_code, "REQUEST_FAILED")
     error: Dict[str, object] = {"code": code, "message": message}
     if detail is not None:
@@ -52,4 +54,4 @@ def structured_error(status_code: int, message: str, detail: object = None,
     content: Dict[str, object] = {"success": False, "error": error}
     if request_id:
         content["request_id"] = request_id
-    return JSONResponse(status_code=status_code, content=content)
+    return JSONResponse(status_code=status_code, content=content, headers=headers)

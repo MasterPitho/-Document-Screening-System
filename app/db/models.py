@@ -146,7 +146,7 @@ class AuditLog(Base):
         nullable=True,
         index=True,
     )
-    event_type = Column(String(40), nullable=False, index=True)
+    event_type = Column(String(40), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
     request_id = Column(String(64), nullable=False)
     message = Column(Text, nullable=False, default="")

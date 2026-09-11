@@ -163,6 +163,7 @@ class ScreeningRepository:
         risk_level: Optional[str] = None,
         date_from: Optional[object] = None,
         date_to: Optional[object] = None,
+        user_id: Optional[int] = None,
         limit: int = 20,
         offset: int = 0,
     ) -> Tuple[int, list[Screening]]:
@@ -175,6 +176,8 @@ class ScreeningRepository:
             filters.append(Screening.created_at >= _normalize_utc(date_from))
         if date_to:
             filters.append(Screening.created_at <= _normalize_utc(date_to))
+        if user_id is not None:
+            filters.append(Screening.user_id == user_id)
 
         with self._database.session() as session:
             total = session.execute(
