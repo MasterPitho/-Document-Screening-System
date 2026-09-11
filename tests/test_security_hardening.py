@@ -132,6 +132,7 @@ def test_default_credentials_disabled_by_default(tmp_path, monkeypatch):
     from app.db.database import Database
     from app.db.repositories import UserRepository
 
+    monkeypatch.delenv("DEV_BOOTSTRAP", raising=False)
     db = Database(f"sqlite:///{(tmp_path / 'nobootstrap.db').as_posix()}")
     db.create_all()
     settings = Settings.from_env()

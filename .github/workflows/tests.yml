@@ -32,7 +32,5 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run Pytest
-        env:
-          DEV_BOOTSTRAP: "true"
         run: |
           pytest -q
