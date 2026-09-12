@@ -1,6 +1,6 @@
 # Document Screening Engine
 
-An explainable **Smart India Hackathon prototype** for document screening. It validates machine-readable identity documents, runs a multi-signal image-forensics pipeline, verifies faces with **InsightFace ArcFace embeddings** (ONNX Runtime), adds **passive presentation-attack (liveness) screening**, and computes a transparent, deterministic risk score. It is **not** a guarantee of document authenticity and **not** an autonomous identity decision; a trained human officer remains the final decision maker.
+ It validates machine-readable identity documents, runs a multi-signal image-forensics pipeline, verifies faces with **InsightFace ArcFace embeddings** (ONNX Runtime), adds **passive presentation-attack (liveness) screening**, and computes a transparent, deterministic risk score. It is **not** a guarantee of document authenticity and **not** an autonomous identity decision; a trained human officer remains the final decision maker.
 
 ## 1. Problem Statement
 
