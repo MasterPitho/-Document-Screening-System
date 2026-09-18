@@ -97,18 +97,25 @@ class CrossSignalEvaluator:
         height, width = image_shape[:2] if len(image_shape) >= 2 else (500, 800)
 
         for region in suspicious_regions:
-            if len(region) >= 4:
+            if isinstance(region, dict):
+                rx = float(region.get("x", 0.0))
+                ry = float(region.get("y", 0.0))
+                rw = float(region.get("w", 0.0))
+                rh = float(region.get("h", 0.0))
+            else:
+                if len(region) < 4:
+                    continue
                 rx, ry, rw, rh = region[:4]
-                # Check if region is in the bottom MRZ / identity area (y >= 0.65 * height)
-                if (ry + rh) >= (0.65 * height) and rw > (0.3 * width):
-                    msg = "Tampering detected in document machine-readable / identity text region."
-                    if msg not in conflicts:
-                        conflicts.append(msg)
-                        factors.append({
-                            "factor": "SUSPICIOUS_FIELD_TAMPERING",
-                            "detail": msg,
-                        })
-                    break
+            # Check if region is in the bottom MRZ / identity area (y >= 0.65 * height)
+            if (ry + rh) >= (0.65 * height) and rw > (0.3 * width):
+                msg = "Tampering detected in document machine-readable / identity text region."
+                if msg not in conflicts:
+                    conflicts.append(msg)
+                    factors.append({
+                        "factor": "SUSPICIOUS_FIELD_TAMPERING",
+                        "detail": msg,
+                    })
+                break
 
         is_consistent = len(conflicts) == 0
         return CrossSignalResult(

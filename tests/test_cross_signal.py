@@ -185,6 +185,33 @@ def test_cross_signal_flags_suspicious_field_tampering():
     assert "SUSPICIOUS_FIELD_TAMPERING" in factor_names
 
 
+def test_cross_signal_accepts_dict_regions_from_tampering_detector():
+    evaluator = CrossSignalEvaluator()
+    doc_result = {
+        "detected": True,
+        "document_type": "PASSPORT",
+        "format": "TD3",
+        "status": "VALID",
+    }
+    # Real contract from TamperingDetector._extract_regions: dicts, not tuples.
+    tamper_result = {
+        "status": "SUSPICIOUS",
+        "suspicious_regions": [
+            {"x": 50, "y": 450, "w": 100, "h": 40, "edge_var": 12.5},
+            {"x": 60, "y": 400, "w": 700, "h": 80, "edge_var": 42.1},
+        ],
+    }
+    res = evaluator.evaluate(
+        requested_type="passport",
+        doc_result=doc_result,
+        tamper_result=tamper_result,
+        face_result={"status": "MATCH"},
+        image_shape=(500, 800),
+    )
+    factor_names = [f["factor"] for f in res.factors]
+    assert "SUSPICIOUS_FIELD_TAMPERING" in factor_names
+
+
 def test_cross_signal_incorporation_in_risk_engine():
     settings = Settings.from_env()
     risk_engine = RiskEngine(settings)
