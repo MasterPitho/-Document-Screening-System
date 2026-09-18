@@ -167,7 +167,17 @@ def create_app(
     app.state.token_repo = token_repo
     app.state.resource_limiter = ResourceLimiter(settings)
 
-    cors_origins = list(settings.cors_origins) if settings.cors_origins else ["*"]
+    cors_origins = list(settings.cors_origins) if settings.cors_origins else []
+
+    # Allow local frontend during development
+    cors_origins.extend([
+        "http://127.0.0.1:5500",
+        "http://localhost:5500",
+    ])
+
+    # Remove duplicates
+    cors_origins = list(dict.fromkeys(cors_origins))
+
     allow_credentials = settings.cors_allow_credentials and "*" not in cors_origins
 
     app.add_middleware(
