@@ -449,7 +449,7 @@
 
 		async function checkBackendHealth() {
 			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), 45000);
+			const timer = setTimeout(() => controller.abort(), 75000);
 			try {
 				const response = await fetch(`${API_BASE}/health`, {
 					method: 'GET',
@@ -974,6 +974,11 @@
 			uploadIcon.textContent = '⏳';
 			dropZone.classList.add('processing');
 			try {
+				if (location.protocol === 'file:') {
+					showToast('Engine blocked (file://) — open dashboard via http://localhost:3000');
+					return;
+				}
+
 				showToast(`Sending ${file.name} to screening engine...`);
 
 				const formData = new FormData();
@@ -983,12 +988,23 @@
 					formData.append('live_photo', activeFaceFile);
 				}
 
-				const res = await apiRequest('/api/v1/screen', {
+				let res = await apiRequest('/api/v1/screen', {
 					method: 'POST',
 					form: formData,
-					timeoutMs: 60000,
+					timeoutMs: 90000,
 					silent: true
 				});
+
+				if (!res.ok && res.status === 0) {
+					showToast('Engine is waking up — retrying...');
+					await new Promise(r => setTimeout(r, 6000));
+					res = await apiRequest('/api/v1/screen', {
+						method: 'POST',
+						form: formData,
+						timeoutMs: 90000,
+						silent: true
+					});
+				}
 
 				if (!res.ok) {
 					if (res.status === 0) {
@@ -1136,6 +1152,13 @@
 		}
 
 		(async () => {
+			if (location.protocol === 'file:') {
+				const banner = document.createElement('div');
+				banner.id = 'file-protocol-banner';
+				banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b3261e;color:#fff;padding:14px 20px;font:600 14px/1.5 "Segoe UI",Arial,sans-serif;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.4)';
+				banner.innerHTML = '⚠ Dashboard galat tarike se khula hai (file://). Ise <b>http://localhost:3000</b> se kholo — warna engine CORS ki vajah se blocked rahega.';
+				document.body.appendChild(banner);
+			}
 			await checkBackendHealth();
 			if (authToken) {
 				const restored = await restoreSession();
