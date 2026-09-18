@@ -261,7 +261,7 @@
 		// ==========================================================================
 		// 1. CONFIGURATION & SAFE STORAGE
 		// ==========================================================================
-		const API_BASE = 'https://document-screening-system-3tvd.onrender.com';
+		const API_BASE = '';
 		
 		const safeStorage = {
 			get(key) {
@@ -383,7 +383,7 @@
 		 */
 		async function apiRequest(path, options = {}) {
 			const method = options.method || 'GET';
-			const timeoutMs = options.timeoutMs || 30000;
+			const timeoutMs = options.timeoutMs || 100000;
 			const silent = !!options.silent;
 
 			const headers = new Headers(getAuthHeaders());
@@ -628,10 +628,19 @@
 					showToast('Account created. Signing you in...');
 				}
 
-				const res = await apiRequest('/api/v1/auth/login', {
+				let res = await apiRequest('/api/v1/auth/login', {
 					method: 'POST',
 					json: { username, password }
 				});
+
+				if (!res.ok && res.status === 0) {
+					showToast('Engine is waking up — retrying sign in...');
+					await new Promise(r => setTimeout(r, 6000));
+					res = await apiRequest('/api/v1/auth/login', {
+						method: 'POST',
+						json: { username, password }
+					});
+				}
 
 				if (res.ok) {
 					const profile = res.data ? res.data.user : null;
