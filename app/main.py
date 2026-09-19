@@ -89,6 +89,42 @@ from app.services.cross_signal import CrossSignalEvaluator
 
 import datetime
 
+# Analysis uses a capped working copy of the uploaded image. This both bounds
+# the memory footprint of the CV/OCR pipeline and avoids processing a 10 MB
+# upload at its native resolution inside the 512 MB Render worker.
+WORKING_IMAGE_MAX_SIDE = 1800
+
+
+def prepare_working_image(image_bytes: bytes, label: str) -> bytes:
+    """Cap an uploaded image's longest side for in-memory analysis.
+
+    Images that already fit the working size are returned untouched (no
+    re-encode). Oversized images are re-encoded as a JPEG at ``quality=88``.
+    Never raises: any decode/encode failure falls back to the original bytes.
+    """
+    max_side = WORKING_IMAGE_MAX_SIDE
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            original_size = img.size
+            if max(original_size) <= max_side:
+                return image_bytes
+            # Downscale BEFORE decoding/converting: thumbnail() tricks the
+            # decoder (draft mode) into reading at the target resolution, so
+            # we never materialise a full-size RGB buffer on top of the
+            # resident InsightFace/ONNX models (OOM worker kill fix).
+            img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=88, optimize=True)
+            logger.info("screen_image_resized", image=label,
+                        original_size=str(original_size),
+                        working_size=str(img.size))
+            return out.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen_image_resize_failed", image=label,
+                       type=type(exc).__name__)
+        return image_bytes
+
 
 # --------------------------------------------------------------------------- #
 # App factory
@@ -338,27 +374,6 @@ def _register_routes(app: FastAPI) -> None:
         # Keep expensive CV/OCR work bounded even when the uploaded file is a
         # very large 10 MB image. The original bytes are validated first, then
         # analysis uses a capped working copy to avoid Render worker kills.
-        def prepare_working_image(image_bytes: bytes, label: str) -> bytes:
-            max_side = 1800
-            try:
-                with Image.open(io.BytesIO(image_bytes)) as img:
-                    img.load()
-                    original_size = img.size
-                    img = img.convert("RGB")
-                    if max(original_size) <= max_side:
-                        return image_bytes
-                    img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-                    out = io.BytesIO()
-                    img.save(out, format="JPEG", quality=88, optimize=True)
-                    logger.info("screen_image_resized", request_id=request_id,
-                                image=label, original_size=str(original_size),
-                                working_size=str(img.size))
-                    return out.getvalue()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("screen_image_resize_failed", request_id=request_id,
-                               image=label, type=type(exc).__name__)
-                return image_bytes
-
         doc_bytes = prepare_working_image(doc_bytes, "document")
         if live_bytes:
             live_bytes = prepare_working_image(live_bytes, "live_photo")
