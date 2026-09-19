@@ -290,7 +290,7 @@
 			toast.textContent = message;
 			toast.classList.add('show');
 			clearTimeout(toastTimer);
-			toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+			toastTimer = setTimeout(() => toast.classList.remove('show'), 5000);
 		}
 
 		// ==========================================================================
@@ -383,7 +383,7 @@
 		 */
 		async function apiRequest(path, options = {}) {
 			const method = options.method || 'GET';
-			const timeoutMs = options.timeoutMs || 30000;
+			const timeoutMs = options.timeoutMs || 120000;
 			const silent = !!options.silent;
 
 			const headers = new Headers(getAuthHeaders());
