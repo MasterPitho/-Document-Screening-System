@@ -60,7 +60,7 @@
 		<div class="page" id="overview">
 			<section class="intro">
 				<div>
-					<small class="kicker" id="live-timestamp">MONDAY, 07 SEPTEMBER 2026 <b></b> 14:32 UTC</small>
+					<small class="kicker" id="live-timestamp">SYNCING&hellip;</small>
 					<h1 id="greeting-text">Good afternoon, Officer.</h1>
 					<p>Your checkpoint is clear. Here is what needs your attention.</p>
 				</div>
@@ -1138,13 +1138,23 @@
 			};
 		});
 
-		// Dynamic UTC timestamp update
+		// Live timestamp: reflects the officer's local date & time, so the wall
+		// clock head matches real-world time (IST for this terminal). Uses
+		// Intl.formatToParts -- toLocaleDateString() silently drops time
+		// options per spec, which left a stale hardcoded value on screen.
 		function updateTimestamp() {
 			const now = new Date();
-			const options = { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short' };
-			const formatted = now.toLocaleDateString('en-GB', options).toUpperCase().replace(',', '');
+			const dateFormatter = new Intl.DateTimeFormat('en-GB', {
+				weekday: 'long', day: '2-digit', month: 'long', year: 'numeric'
+			});
+			const timeFormatter = new Intl.DateTimeFormat('en-GB', {
+				hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short'
+			});
+			const dateStr = dateFormatter.formatToParts(now).map(p => p.value).join('');
+			const timeStr = timeFormatter.formatToParts(now)
+				.map(p => ['hour', 'minute', 'literal', 'timeZoneName'].includes(p.type) ? p.value : '').join('');
 			const el = document.querySelector('#live-timestamp');
-			if (el) el.innerHTML = `${formatted.replace(/(\d{4})/, '$1 <b></b>')}`;
+			if (el) el.innerHTML = `${dateStr} <b></b> ${timeStr}`.toUpperCase();
 		}
 		updateTimestamp();
 		setInterval(updateTimestamp, 60000);
