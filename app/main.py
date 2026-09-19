@@ -154,16 +154,6 @@ def create_app(
         version="1.2.0",
         lifespan=lifespan,
     )
-    
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "https://delicate-babka-74b206.netlify.app",
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     app.state.settings = settings
     app.state.database = database
@@ -180,6 +170,11 @@ def create_app(
     app.state.resource_limiter = ResourceLimiter(settings)
 
     cors_origins = list(settings.cors_origins) if settings.cors_origins else []
+
+    # Allow Netlify frontend
+    cors_origins.append(
+      "https://delicate-babka-74b206.netlify.app"
+    )
 
     # Allow local frontend during development
     cors_origins.extend([
