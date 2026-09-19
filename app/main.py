@@ -140,6 +140,8 @@ def create_app(
         liveness_detector.initialize()  # fails safe to the heuristic fallback
         yield
 
+
+    from fastapi.middleware.cors import CORSMiddleware
     app = FastAPI(
         title="Document Screening Engine",
         description=(
@@ -152,7 +154,7 @@ def create_app(
         version="1.2.0",
         lifespan=lifespan,
     )
-    from fastapi.middleware.cors import CORSMiddleware
+    
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
