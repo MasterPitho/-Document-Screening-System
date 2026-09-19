@@ -1,0 +1,1157 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Sentinel | Identity & Document Screening</title>
+	<link rel="stylesheet" href="frontend1.css">
+</head>
+<body>
+	<aside class="sidebar">
+		<div class="brand gov-brand">
+			<b class="chakra" aria-hidden="true">☸</b>
+			<span class="gov-title">भारत सरकार<small>GOVERNMENT OF INDIA</small></span>
+		</div>
+		<div class="terminal"><i></i> Terminal 04 <small>North Gate</small></div>
+		<nav>
+			<a class="active" href="#overview">&#9632; Overview</a>
+			<a href="#screening">&#9678; New screening</a>
+			<a href="#queue">&#9776; Review queue <em id="queue-badge">--</em></a>
+			<a href="#watchlists">&#10003; Watchlists</a>
+		</nav>
+		<div class="side-bottom">
+			<div id="settings-panel">
+				<button id="theme-toggle" class="theme-toggle-btn" type="button" aria-pressed="false">
+					<span class="theme-icon">&#9790;</span>
+					<span class="theme-text">Dark mode</span>
+				</button>
+				<button id="logout" type="button">&#8618; Sign in / Switch user</button>
+			</div>
+			<div class="operator">
+				<b id="officer-avatar">--</b>
+				<span><strong id="officer-name-display">Not Signed In</strong><small id="officer-role-display">Click to authenticate</small></span>
+				<i>...</i>
+			</div>
+		</div>
+	</aside>
+
+	<main>
+		<header>
+			<div class="header-identity">
+				<span class="header-mark" aria-hidden="true">☸</span>
+				<span><strong>भारत सरकार</strong><small>GOVERNMENT OF INDIA</small></span>
+				<b class="header-divider"></b>
+				<span class="header-section">Citizen Identity Screening <b>/</b> <strong>Overview</strong></span>
+			</div>
+			<div class="header-actions">
+				<label id="system-status-badge"><i></i> Checking system...</label>
+				<button id="theme-toggle-header" class="theme-toggle-btn" type="button" aria-label="Toggle dark mode" title="Toggle theme (Dark / Light)">
+					<span class="theme-icon">&#9790;</span>
+					<span class="theme-text">Dark mode</span>
+				</button>
+				<button id="btn-header-login" type="button" aria-label="Officer Sign in">
+					<span>&#128100;</span> <span id="header-auth-label">Sign In</span>
+				</button>
+				<button class="icon-btn" id="notifications" type="button" aria-label="Show notifications">&#128276;</button>
+				<button class="icon-btn help" id="help" type="button" aria-label="Show help">?</button>
+			</div>
+		</header>
+
+		<div class="page" id="overview">
+			<section class="intro">
+				<div>
+					<small class="kicker" id="live-timestamp">MONDAY, 07 SEPTEMBER 2026 <b></b> 14:32 UTC</small>
+					<h1 id="greeting-text">Good afternoon, Officer.</h1>
+					<p>Your checkpoint is clear. Here is what needs your attention.</p>
+				</div>
+				<button class="primary" id="btn-new-screening">+ &nbsp;New screening</button>
+			</section>
+
+			<section class="metrics">
+				<article>
+					<small>Screenings today <i>&#9678;</i></small>
+					<strong id="metric-today">--</strong>
+					<p class="up" id="metric-today-delta">Unavailable</p>
+				</article>
+				<article>
+					<small>Cleared <i class="green">&#10003;</i></small>
+					<strong id="metric-cleared">--</strong>
+					<p class="up" id="metric-cleared-pct">Unavailable</p>
+				</article>
+				<article>
+					<small>Flagged for review <i class="amber">!</i></small>
+					<strong id="metric-flagged">--</strong>
+					<p class="down" id="metric-flagged-note">Unavailable</p>
+				</article>
+				<article>
+					<small>Avg. processing time <i>&#9201;</i></small>
+					<strong id="metric-time">--</strong>
+					<p class="up" id="metric-time-delta">Unavailable</p>
+				</article>
+			</section>
+
+			<section class="identity-panel panel" id="identity-verification">
+				<div class="panel-title">
+					<div>
+						<small class="kicker">IDENTITY VERIFICATION</small>
+						<h2>Face match check</h2>
+					</div>
+					<span class="verification-state" id="verification-state">Not started</span>
+				</div>
+				<div class="identity-content">
+					<div class="identity-visual" id="identity-visual">
+						<div class="face-frame"><span>+</span></div>
+						<small>Live capture or selfie image</small>
+					</div>
+					<div class="identity-copy">
+						<p>Compare the applicant's face with the portrait on the submitted document using ArcFace embeddings.</p>
+						<div class="verification-meter"><span id="verification-meter-fill"></span></div>
+						<div class="verification-meta">
+							<span>Match confidence</span>
+							<strong id="match-score">--</strong>
+						</div>
+						<button class="outline" id="face-upload" type="button">Add face image</button>
+						<input id="face-file" type="file" hidden accept="image/*">
+						<small class="privacy-note">Processed with ArcFace AI verification · Privacy compliant</small>
+					</div>
+				</div>
+			</section>
+
+			<section class="grid" id="screening">
+				<article class="panel intake">
+					<div class="panel-title">
+						<div>
+							<small class="kicker">DOCUMENT INTAKE</small>
+							<h2>Start a screening</h2>
+						</div>
+						<small>01 <b></b> 03</small>
+					</div>
+					<div class="drop" id="drop">
+						<div class="upload" id="upload-icon">&#8593;</div>
+						<h3 id="drop-title">Drop a document to begin</h3>
+						<p id="drop-subtitle">or select a file from this device</p>
+						<button class="outline" id="browse" type="button">Browse files</button>
+						<input id="files" type="file" hidden accept="image/*,.pdf">
+						<small>JPG, PNG or PDF <span>Max 10 MB</span></small>
+					</div>
+					<label class="accepted">Accepted documents</label>
+					<div class="types">
+						<button class="selected" type="button" data-type="passport">&#9635; Passport</button>
+						<button type="button" data-type="national_id">&#9633; National ID</button>
+						<button type="button" data-type="pan">&#9642; Aadhaar / PAN</button>
+					</div>
+				</article>
+
+				<article class="panel">
+					<div class="panel-title">
+						<div>
+							<small class="kicker">NETWORK ACTIVITY</small>
+							<h2>Risk overview</h2>
+						</div>
+						<button class="filter" id="filter" type="button">Last 24 hours &#9662;</button>
+					</div>
+					<div class="chart">
+						<div class="axis">100<br><br>75<br><br>50<br><br>25<br><br>0</div>
+						<div class="graph">
+							<div class="lines"></div>
+							<svg viewBox="0 0 500 150" preserveAspectRatio="none">
+								<path class="fill" d="M0 120C30 118 35 83 65 91S91 102 110 80S145 94 162 68S194 83 215 58S247 71 270 48S302 69 326 45S360 55 378 34S410 56 432 27S470 47 500 13V150H0Z"/>
+								<path class="stroke" d="M0 120C30 118 35 83 65 91S91 102 110 80S145 94 162 68S194 83 215 58S247 71 270 48S302 69 326 45S360 55 378 34S410 56 432 27S470 47 500 13"/>
+							</svg>
+							<div class="times">
+								<span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>Now</span>
+							</div>
+						</div>
+					</div>
+					<div class="legend">
+						<span><i></i> Average risk score <b id="stat-avg-risk">--</b></span>
+						<span><i></i> High risk events <b id="stat-high-risk">--</b></span>
+					</div>
+				</article>
+			</section>
+
+			<section class="panel report-panel" id="report-summary">
+				<div class="panel-title">
+					<div>
+						<small class="kicker">REPORT SUMMARY</small>
+						<h2>All-time screening report</h2>
+					</div>
+					<small>PostgreSQL audit trail</small>
+				</div>
+				<div class="report-stats">
+					<span><small>Total screenings</small><b id="report-total">--</b></span>
+					<span><small>Cleared</small><b id="report-cleared">--</b></span>
+					<span><small>Secondary inspection</small><b id="report-secondary">--</b></span>
+					<span><small>High risk</small><b id="report-high-risk">--</b></span>
+					<span><small>Avg. processing</small><b id="report-avg-time">--</b></span>
+				</div>
+				<div class="report-breakdown">
+					<span>By decision <span id="report-by-decision" class="tags"></span></span>
+					<span>By risk level <span id="report-by-risk" class="tags"></span></span>
+				</div>
+			</section>
+
+			<section id="queue" class="queue">
+				<div class="queue-head">
+					<div>
+						<small class="kicker">LIVE FEED</small>
+						<h2>Recent screenings</h2>
+					</div>
+					<a id="view-all" href="#queue">View all screenings &#8594;</a>
+				</div>
+				<div class="table">
+					<table>
+						<thead>
+							<tr>
+								<th>Applicant</th>
+								<th>Document</th>
+								<th>Processed</th>
+								<th>Risk score</th>
+								<th>Status</th>
+								<th>Actions</th>
+							</tr>
+						</thead>
+						<tbody id="screening-rows">
+							<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">No screenings found</td></tr>
+						</tbody>
+					</table>
+				</div>
+			</section>
+		</div>
+	</main>
+
+	<div id="toast"></div>
+
+	<div id="detail-screen" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+		<div class="detail-card">
+			<button type="button" class="modal-close-btn" id="btn-close-detail" aria-label="Close dialog">&#10005;</button>
+			<small class="kicker">SCREENING RECORD</small>
+			<h2 id="detail-title">Screening details</h2>
+			<dl id="detail-body"></dl>
+			<div class="detail-actions" id="detail-actions">
+				<span class="detail-actions-label">Set decision</span>
+				<button type="button" class="da-btn" data-decision="CLEARED">Cleared</button>
+				<button type="button" class="da-btn" data-decision="SECONDARY_INSPECTION">Review</button>
+				<button type="button" class="da-btn" data-decision="HOLD">Hold</button>
+			</div>
+		</div>
+	</div>
+
+	<div id="login-screen" role="dialog" aria-modal="true" aria-labelledby="login-title">
+		<form class="login-card" id="login-form" autocomplete="off">
+			<button type="button" class="modal-close-btn" id="btn-close-login" aria-label="Close dialog">&#10005;</button>
+			<small class="kicker">OFFICER ACCESS</small>
+			<h2 id="login-title">Sign in to Sentinel</h2>
+			<p>Enter your officer credentials to authenticate with the screening engine.</p>
+
+			<label for="officer-id">Officer Username / ID</label>
+			<input id="officer-id" name="officerId" autocomplete="off" required placeholder="Enter username or badge ID (e.g. officer_01)">
+			<label for="officer-password">Password</label>
+			<input id="officer-password" name="password" type="password" autocomplete="off" required minlength="8" placeholder="Enter password (min 8 characters)">
+			<label for="officer-email" id="email-label" style="display:none">Email (required for sign-up)</label>
+			<input id="officer-email" name="email" type="email" autocomplete="off" style="display:none" placeholder="officer@sentinel.gov.in">
+			<button type="submit" id="btn-submit-auth">Sign In</button>
+			<button type="button" id="btn-toggle-register" style="background:transparent;color:var(--teal);border:1px solid var(--border-soft);box-shadow:none;">Create new officer account</button>
+			<button type="button" id="btn-sign-out" style="display:none; width:100%; margin-top:8px; padding:10px; border:1px solid #c75a50; border-radius:4px; background:transparent; color:#e06d64; font-weight:600; cursor:pointer;">Sign Out Current Officer</button>
+			<small id="auth-status-note">Connected to https://document-screening-system-3tvd.onrender.com</small>
+		</form>
+	</div>
+
+	<script>
+		// ==========================================================================
+		// 1. CONFIGURATION & SAFE STORAGE
+		// ==========================================================================
+		const API_BASE = 'https://document-screening-system-3tvd.onrender.com';
+		
+		const safeStorage = {
+			get(key) {
+				try { return localStorage.getItem(key); } catch (e) { return null; }
+			},
+			set(key, value) {
+				try { localStorage.setItem(key, value); } catch (e) {}
+			},
+			remove(key) {
+				try { localStorage.removeItem(key); } catch (e) {}
+			}
+		};
+
+		let authToken = safeStorage.get('sentinel_auth_token') || null;
+		let activeFaceFile = null;
+		let activeFaceUrl = null;
+		let backendReachable = false;
+		let screeningInProgress = false;
+
+		// ==========================================================================
+		// 2. TOAST NOTIFICATIONS
+		// ==========================================================================
+		const toast = document.querySelector('#toast');
+		let toastTimer;
+		function showToast(message) {
+			toast.textContent = message;
+			toast.classList.add('show');
+			clearTimeout(toastTimer);
+			toastTimer = setTimeout(() => toast.classList.remove('show'), 3200);
+		}
+
+		// ==========================================================================
+		// 3. THEME MANAGEMENT (DARK / LIGHT)
+		// ==========================================================================
+		function applyTheme(isDark) {
+			document.body.classList.toggle('dark-mode', isDark);
+			document.querySelectorAll('.theme-toggle-btn').forEach(btn => {
+				btn.setAttribute('aria-pressed', String(isDark));
+				const icon = btn.querySelector('.theme-icon');
+				const text = btn.querySelector('.theme-text');
+				if (icon) icon.textContent = isDark ? '☀' : '☾';
+				if (text) text.textContent = isDark ? 'Light mode' : 'Dark mode';
+			});
+			safeStorage.set('sentinel-theme', isDark ? 'dark' : 'light');
+		}
+
+		function toggleTheme() {
+			const isDark = document.body.classList.contains('dark-mode');
+			applyTheme(!isDark);
+			showToast(!isDark ? 'Dark mode enabled' : 'Light mode enabled');
+		}
+
+		document.querySelectorAll('.theme-toggle-btn').forEach(btn => {
+			btn.onclick = toggleTheme;
+		});
+
+		const savedTheme = safeStorage.get('sentinel-theme');
+		if (savedTheme === 'dark' || (!savedTheme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+			applyTheme(true);
+		} else {
+			applyTheme(false);
+		}
+
+		// ==========================================================================
+		// 4. API CLIENT & BACKEND CONNECTIVITY
+		// ==========================================================================
+		const systemStatusBadge = document.querySelector('#system-status-badge');
+
+		function esc(s) {
+			if (s === null || s === undefined) return '';
+			return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+		}
+
+		function getAuthHeaders() {
+			const headers = {};
+			if (authToken) {
+				headers['Authorization'] = `Bearer ${authToken}`;
+			}
+			return headers;
+		}
+
+		function extractApiError(data, status) {
+			if (!data) return `HTTP ${status}`;
+			if (data.error) {
+				const e = data.error;
+				return e.message || (typeof e.detail === 'string' && e.detail) || e.code || `HTTP ${status}`;
+			}
+			if (data.detail) {
+				if (Array.isArray(data.detail)) {
+					return data.detail.map(d => {
+						const loc = (d.loc || []).filter(x => typeof x === 'string').join('.');
+						return `${loc ? loc + ': ' : ''}${d.msg || d.type || ''}`;
+					}).filter(Boolean).join('; ');
+				}
+				return String(data.detail);
+			}
+			if (data.message) return String(data.message);
+			return `HTTP ${status}`;
+		}
+
+		function clearSessionState() {
+			authToken = null;
+			safeStorage.remove('sentinel_auth_token');
+			safeStorage.remove('sentinel_user');
+			updateOfficerUI(null);
+		}
+
+		function openLoginModal() {
+			loginScreen.classList.add('visible');
+			const officerIdInput = document.querySelector('#officer-id');
+			if (officerIdInput) officerIdInput.focus();
+		}
+
+		/**
+		 * Reusable API client. Returns { ok, status, data, message }.
+		 * 401 -> clears session + opens login modal (never fake data)
+		 * 403 -> access denied | 422 -> real FastAPI validation message
+		 * 404 -> not found | 5xx -> backend error | network -> unreachable
+		 */
+		async function apiRequest(path, options = {}) {
+			const method = options.method || 'GET';
+			const timeoutMs = options.timeoutMs || 30000;
+			const silent = !!options.silent;
+
+			const headers = new Headers(getAuthHeaders());
+			let body;
+			if (options.json !== undefined) {
+				headers.set('Content-Type', 'application/json');
+				body = JSON.stringify(options.json);
+			} else if (options.form !== undefined) {
+				body = options.form; // browser sets the multipart boundary automatically
+			}
+
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+			try {
+				const response = await fetch(`${API_BASE}${path}`, {
+					method,
+					headers,
+					body,
+					signal: controller.signal
+				});
+
+				const data = await response.json().catch(() => null);
+
+				if (!response.ok) {
+					const message = extractApiError(data, response.status);
+
+					if (response.status === 401) {
+						clearSessionState();
+						openLoginModal();
+						if (!silent) showToast('Session expired · Please sign in again');
+						return { ok: false, status: 401, data, message: 'Session expired' };
+					}
+					if (response.status === 403) {
+						if (!silent) showToast(`Access denied (403) · ${message}`);
+						return { ok: false, status: 403, data, message };
+					}
+					if (response.status === 404) {
+						if (!silent) showToast(`Not found (404) · ${message}`);
+					} else if (response.status === 422) {
+						if (!silent) showToast(`Validation error: ${message}`);
+					} else if (response.status >= 500) {
+						if (!silent) showToast(`Backend error (${response.status}): ${message}`);
+					} else if (!silent) {
+						showToast(`Request failed (${response.status}): ${message}`);
+					}
+					console.error(`API ${method} ${path} -> ${response.status}:`, data);
+					return { ok: false, status: response.status, data, message };
+				}
+
+				return { ok: true, status: response.status, data };
+			} catch (err) {
+				const isTimeout = err && err.name === 'AbortError';
+				if (!silent) {
+					showToast(isTimeout ? 'Request timed out — unable to reach backend' : 'Cannot reach the backend server');
+				}
+				console.error(`API ${method} ${path} network error:`, err);
+				return { ok: false, status: 0, data: null, message: isTimeout ? 'timeout' : 'network' };
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		async function checkBackendHealth() {
+			const controller = new AbortController();
+			const timer = setTimeout(() => controller.abort(), 45000);
+			try {
+				const response = await fetch(`${API_BASE}/health`, {
+					method: 'GET',
+					mode: 'cors',
+					signal: controller.signal
+				});
+				if (response.ok) {
+					backendReachable = true;
+					systemStatusBadge.classList.remove('offline');
+					systemStatusBadge.innerHTML = '<i></i> Live Engine Online';
+					return true;
+				}
+			} catch (err) {
+				console.warn('Health check failed:', err.message || err);
+			} finally {
+				clearTimeout(timer);
+			}
+			backendReachable = false;
+			systemStatusBadge.classList.add('offline');
+			systemStatusBadge.innerHTML = '<i></i> Engine Offline';
+			return false;
+		}
+
+		// ==========================================================================
+		// 5. AUTHENTICATION & OFFICER PROFILE
+		// ==========================================================================
+		const loginScreen = document.querySelector('#login-screen');
+		const loginForm = document.querySelector('#login-form');
+		const logoutButton = document.querySelector('#logout');
+		const officerIdInput = document.querySelector('#officer-id');
+		const officerPassInput = document.querySelector('#officer-password');
+		const officerAvatar = document.querySelector('#officer-avatar');
+		const officerNameDisplay = document.querySelector('#officer-name-display');
+		const officerRoleDisplay = document.querySelector('#officer-role-display');
+		const greetingText = document.querySelector('#greeting-text');
+		const headerAuthLabel = document.querySelector('#header-auth-label');
+		const btnHeaderLogin = document.querySelector('#btn-header-login');
+		const operatorCard = document.querySelector('.operator');
+
+		const btnSignOut = document.querySelector('#btn-sign-out');
+
+		function saveOfficerSession(profile) {
+			safeStorage.set('sentinel_auth_token', authToken);
+			safeStorage.set('sentinel_user', JSON.stringify(profile));
+		}
+
+		function updateOfficerUI(officer) {
+			if (!officer) {
+				officerAvatar.textContent = '--';
+				officerNameDisplay.textContent = 'Not Signed In';
+				officerRoleDisplay.textContent = 'Click to authenticate';
+				greetingText.textContent = 'Good afternoon, Officer.';
+				if (headerAuthLabel) headerAuthLabel.textContent = 'Sign In';
+				if (btnSignOut) btnSignOut.style.display = 'none';
+				return;
+			}
+			const name = officer.full_name || officer.username || 'Officer';
+			const initials = name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase() || 'OF';
+			officerAvatar.textContent = initials;
+			officerNameDisplay.textContent = name;
+			officerRoleDisplay.textContent = `${officer.role || 'Officer'} · ${officer.officer_id || 'North Gate'}`;
+			greetingText.textContent = `Good afternoon, ${name.split(' ')[0]}.`;
+			if (headerAuthLabel) {
+				headerAuthLabel.textContent = name.split(' ')[0];
+			}
+			if (btnSignOut) btnSignOut.style.display = 'block';
+		}
+
+		const btnSubmitAuth = document.querySelector('#btn-submit-auth');
+		const btnCloseLogin = document.querySelector('#btn-close-login');
+
+		if (btnCloseLogin) {
+			btnCloseLogin.onclick = () => loginScreen.classList.remove('visible');
+		}
+
+		loginScreen.onclick = event => {
+			if (event.target === loginScreen) {
+				loginScreen.classList.remove('visible');
+			}
+		};
+
+		async function handleLogout() {
+			const hadToken = !!authToken;
+			let serverOk = false;
+			if (hadToken) {
+				const res = await apiRequest('/api/v1/auth/logout', { method: 'POST', silent: true });
+				serverOk = res.ok;
+			}
+			clearSessionState();
+			officerIdInput.value = '';
+			officerPassInput.value = '';
+			btnSubmitAuth.textContent = 'Sign In';
+			loginScreen.classList.remove('visible');
+			if (!hadToken) return;
+			showToast(serverOk ? 'Signed out' : 'Signed out locally · server logout request failed');
+		}
+
+		if (btnSignOut) {
+			btnSignOut.onclick = handleLogout;
+		}
+
+		async function restoreSession() {
+			if (!authToken) return false;
+			const res = await apiRequest('/api/v1/auth/me', { silent: true });
+			if (res.ok) {
+				saveOfficerSession(res.data);
+				updateOfficerUI(res.data);
+				return true;
+			}
+			// 401 is handled inside apiRequest: token + user cleared, login modal shown.
+			return false;
+		}
+
+		if (btnHeaderLogin) btnHeaderLogin.onclick = openLoginModal;
+		if (logoutButton) logoutButton.onclick = openLoginModal;
+		if (operatorCard) {
+			operatorCard.style.cursor = 'pointer';
+			operatorCard.title = 'Click to switch officer or sign in';
+			operatorCard.onclick = openLoginModal;
+		}
+
+		// Initialize view as unauthenticated; a saved session is restored below at load time
+		updateOfficerUI(null);
+
+		let isRegisterMode = false;
+		const btnToggleRegister = document.querySelector('#btn-toggle-register');
+		const emailLabel = document.querySelector('#email-label');
+		const emailInput = document.querySelector('#officer-email');
+
+		function setRegisterMode(enabled) {
+			isRegisterMode = enabled;
+			emailLabel.style.display = enabled ? 'block' : 'none';
+			emailInput.style.display = enabled ? 'block' : 'none';
+			btnToggleRegister.textContent = enabled ? 'Sign in to existing account' : 'Create new officer account';
+			btnSubmitAuth.textContent = enabled ? 'Create Account' : 'Sign In';
+		}
+
+		if (btnToggleRegister) btnToggleRegister.onclick = () => setRegisterMode(!isRegisterMode);
+
+		loginForm.onsubmit = async event => {
+			event.preventDefault();
+			const username = officerIdInput.value.trim();
+			const password = officerPassInput.value;
+			if (!username) {
+				showToast('Enter your officer username');
+				officerIdInput.focus();
+				return;
+			}
+			if (password.length < 8) {
+				showToast('Password must be at least 8 characters');
+				officerPassInput.focus();
+				return;
+			}
+
+			const originalBtnText = btnSubmitAuth.textContent;
+			btnSubmitAuth.textContent = isRegisterMode ? 'Creating account...' : 'Signing in...';
+			btnSubmitAuth.disabled = true;
+
+			try {
+				if (isRegisterMode) {
+					const email = emailInput.value.trim();
+					if (!email) {
+						showToast('Email is required to create an account');
+						emailInput.focus();
+						return;
+					}
+					const fullName = username.replace(/[_-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+					const reg = await apiRequest('/api/v1/auth/register', {
+						method: 'POST',
+						json: { username, email, password, full_name: fullName, role: 'officer', officer_id: null }
+					});
+					if (!reg.ok) {
+						showToast(`Account creation failed: ${reg.message}`);
+						return;
+					}
+					showToast('Account created. Signing you in...');
+				}
+
+				const res = await apiRequest('/api/v1/auth/login', {
+					method: 'POST',
+					json: { username, password }
+				});
+
+				if (res.ok) {
+					const profile = res.data ? res.data.user : null;
+					if (!res.data || !res.data.token || !profile) {
+						showToast('Unexpected login response from backend');
+						return;
+					}
+					authToken = res.data.token;
+					saveOfficerSession(profile);
+					updateOfficerUI(profile);
+					if (isRegisterMode) setRegisterMode(false);
+					loginScreen.classList.remove('visible');
+					officerPassInput.value = '';
+					showToast(`Welcome, ${profile.full_name || profile.username} · Authenticated with Live Engine`);
+					await refreshAllDashboardData();
+					return;
+				}
+				showToast(`Authentication failed: ${res.message}`);
+			} finally {
+				btnSubmitAuth.textContent = originalBtnText;
+				btnSubmitAuth.disabled = false;
+			}
+		};
+
+		// ==========================================================================
+		// 6. DASHBOARD STATS & TRENDS (GET /api/v1/stats/trend)
+		// ==========================================================================
+		const filterBtn = document.querySelector('#filter');
+		const metricToday = document.querySelector('#metric-today');
+		const metricTodayDelta = document.querySelector('#metric-today-delta');
+		const metricCleared = document.querySelector('#metric-cleared');
+		const metricFlagged = document.querySelector('#metric-flagged');
+		const metricTime = document.querySelector('#metric-time');
+		const statAvgRisk = document.querySelector('#stat-avg-risk');
+		const statHighRisk = document.querySelector('#stat-high-risk');
+
+		async function fetchDashboardStats(range = '24h') {
+			if (!authToken) return;
+			const res = await apiRequest(`/api/v1/stats/trend?range=${range}`, { silent: true });
+			if (!res.ok) return;
+			const data = res.data || {};
+			if (data.today_total != null) metricToday.textContent = data.today_total;
+			if (data.delta_today_pct != null) {
+				const isUp = data.delta_today_pct >= 0;
+				metricTodayDelta.className = isUp ? 'up' : 'down';
+				metricTodayDelta.innerHTML = `${isUp ? '&#8593;' : '&#8595;'} ${Math.abs(data.delta_today_pct)}% <span>vs. yesterday</span>`;
+			}
+			if (data.average_risk_score != null) {
+				statAvgRisk.textContent = Number(data.average_risk_score).toFixed(1);
+			}
+			if (data.high_risk_events_count != null) {
+				statHighRisk.textContent = String(data.high_risk_events_count).padStart(2, '0');
+			}
+			if (data.avg_processing_time_ms) {
+				metricTime.innerHTML = `${(data.avg_processing_time_ms / 1000).toFixed(1)}<sup>s</sup>`;
+			}
+
+			// Cleared/flagged split comes from all-time stats
+			const stats = await apiRequest('/api/v1/stats', { silent: true });
+			if (stats.ok && stats.data) {
+				const total = stats.data.total ?? data.today_total;
+				if (total != null) metricToday.textContent = total;
+				if (stats.data.cleared != null) metricCleared.textContent = stats.data.cleared;
+				if (stats.data.high_risk != null || stats.data.secondary_inspection != null) {
+					metricFlagged.textContent = (stats.data.high_risk ?? 0) + (stats.data.secondary_inspection ?? 0);
+				}
+			}
+		}
+
+		// 6b. ALL-TIME REPORT SUMMARY (GET /api/v1/report/summary + /api/v1/stats)
+		const reportTotal = document.querySelector('#report-total');
+		const reportCleared = document.querySelector('#report-cleared');
+		const reportSecondary = document.querySelector('#report-secondary');
+		const reportHighRisk = document.querySelector('#report-high-risk');
+		const reportAvgTime = document.querySelector('#report-avg-time');
+		const reportByDecision = document.querySelector('#report-by-decision');
+		const reportByRisk = document.querySelector('#report-by-risk');
+
+		async function fetchReportSummary() {
+			if (!authToken) return;
+			const res = await apiRequest('/api/v1/report/summary', { silent: true });
+			if (!res.ok) return;
+			const data = res.data || {};
+			if (reportTotal) reportTotal.textContent = data.total_screenings ?? '—';
+			if (reportCleared) reportCleared.textContent = data.cleared ?? '—';
+			if (reportSecondary) reportSecondary.textContent = data.secondary_inspection ?? '—';
+			if (reportHighRisk) reportHighRisk.textContent = data.high_risk ?? '—';
+			if (reportAvgTime && data.avg_processing_time_ms != null) {
+				reportAvgTime.textContent = (data.avg_processing_time_ms / 1000).toFixed(1) + 's';
+			}
+			if (reportByDecision && data.by_decision) {
+				reportByDecision.innerHTML = Object.entries(data.by_decision)
+					.map(([k, v]) => `<span class="tag">${esc(k)}: ${v}</span>`).join('');
+			}
+			if (reportByRisk && data.by_risk_level) {
+				reportByRisk.innerHTML = Object.entries(data.by_risk_level)
+					.map(([k, v]) => `<span class="tag">${esc(k)}: ${v}</span>`).join('');
+			}
+		}
+
+		filterBtn.onclick = () => {
+			const periods = [
+				{ label: 'Last 24 hours', range: '24h' },
+				{ label: 'Last 7 days', range: '7d' },
+				{ label: 'Last 30 days', range: '30d' }
+			];
+			const currentText = filterBtn.textContent.replace(/[▾▼\s]/g, '').trim();
+			const currentIndex = periods.findIndex(p => p.label.replace(/\s/g, '') === currentText);
+			const next = periods[(currentIndex + 1) % periods.length];
+			filterBtn.textContent = next.label + ' ▾';
+			showToast('Showing statistics for ' + next.label.toLowerCase());
+			fetchDashboardStats(next.range);
+		};
+
+		// ==========================================================================
+		// 7. LIVE RECENT SCREENINGS (GET /api/v1/screenings)
+		// ==========================================================================
+		const screeningRows = document.querySelector('#screening-rows');
+
+		function renderScreeningRow(record) {
+			const tr = document.createElement('tr');
+			const score = record.risk_score;
+			const scoreText = (score === null || score === undefined) ? '—' : score;
+			const scoreClass = score > 70 ? 'high' : score > 40 ? 'mid' : 'low';
+			const statusDecision = String(record.decision || '').toUpperCase();
+			const statusLabel = statusDecision.includes('HOLD') || statusDecision.includes('HIGH') ? 'On hold'
+				: statusDecision.includes('REVIEW') || statusDecision.includes('SECONDARY') ? 'Review'
+				: statusDecision === 'CLEARED' ? 'Cleared' : 'Pending';
+			const markClass = statusLabel === 'On hold' ? 'hold' : statusLabel === 'Review' ? 'review' : '';
+			const ref = record.request_id || 'REQ-' + (record.id || '');
+			const initials = ref.replace(/[^A-Z0-9]/gi, '').slice(0, 2).toUpperCase() || '--';
+			const docType = (record.document_type || 'Passport').replace(/[_-]/g, ' ');
+			const src = (record.mrz_source && String(record.mrz_source) !== 'none') ? esc(record.mrz_source) : '';
+			const when = record.created_at ? new Date(record.created_at).toLocaleString() : '—';
+
+			tr.innerHTML = `
+				<td><b class="face one">${esc(initials)}</b><strong>${esc(ref)}</strong></td>
+				<td>&#9635; ${esc(docType)} <small>${src}</small></td>
+				<td>${when}</td>
+				<td><span class="score ${score > 0 ? scoreClass : 'low'}">${scoreText} <i></i></span></td>
+				<td><mark class="${markClass}">${statusLabel}</mark></td>
+				<td><button class="row-menu" type="button" aria-label="Open actions for ${esc(ref)}">...</button></td>
+			`;
+			tr.querySelector('.row-menu').onclick = () => openScreeningDetail(record.id || record.request_id);
+			return tr;
+		}
+
+		async function fetchRecentScreenings() {
+			if (!authToken) return;
+			const res = await apiRequest('/api/v1/screenings?limit=5', { silent: true });
+			if (!res.ok || !res.data) return;
+			const records = res.data.records;
+			screeningRows.innerHTML = '';
+			if (records && records.length > 0) {
+				records.forEach(rec => screeningRows.appendChild(renderScreeningRow(rec)));
+			} else {
+				screeningRows.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px 0;font-size:12px">No screenings found</td></tr>`;
+			}
+		}
+
+		// ==========================================================================
+		// 7b. SCREENING DETAIL MODAL (GET /api/v1/screenings/{id} [+ /factors])
+		// ==========================================================================
+		const detailScreen = document.querySelector('#detail-screen');
+		const detailTitle = document.querySelector('#detail-title');
+		const detailBody = document.querySelector('#detail-body');
+
+		function detailRow(label, value) {
+			let val = value;
+			if (val === null || val === undefined || val === '' || val === 'none') val = '—';
+			return `<div class="detail-row"><dt>${esc(label)}</dt><dd>${esc(val)}</dd></div>`;
+		}
+
+		let activeDetailId = null;
+
+		async function updateScreeningDecision(decision) {
+			if (!activeDetailId) return;
+			const res = await apiRequest(`/api/v1/screenings/${encodeURIComponent(activeDetailId)}/decision`, {
+				method: 'PATCH',
+				json: { decision }
+			});
+			if (res.ok) {
+				showToast('Decision set to: ' + String(decision).replace(/_/g, ' ').toLowerCase());
+				detailScreen.classList.remove('visible');
+				await fetchRecentScreenings();
+				await fetchDashboardStats('24h');
+			} else {
+				showToast(`Could not update decision: ${res.message}`);
+			}
+		}
+
+		async function openScreeningDetail(id) {
+			if (!detailScreen || !detailBody) return;
+			activeDetailId = id;
+			detailBody.innerHTML = '<div class="detail-status">Loading record...</div>';
+			detailTitle.textContent = 'Screening details';
+			detailScreen.classList.add('visible');
+
+			const res = await apiRequest(`/api/v1/screenings/${encodeURIComponent(id)}`, { silent: true });
+			if (!res.ok) {
+				detailBody.innerHTML = `<div class="detail-status detail-error">Could not load detail: ${esc(res.message)}</div>`;
+				return;
+			}
+			const data = res.data || {};
+
+			const pct = n => (n === null || n === undefined) ? null : (Math.round(n * 100) + '%');
+			detailTitle.textContent = `Screening · ${data.request_id || id}`;
+			detailBody.innerHTML = [
+				detailRow('Request ID', data.request_id),
+				detailRow('Document type', data.document_type),
+				detailRow('MRZ source', data.mrz_source),
+				detailRow('Risk score', data.risk_score),
+				detailRow('Risk level', data.risk_level),
+				detailRow('Decision', data.decision),
+				detailRow('Face similarity', pct(data.face_similarity) != null ? pct(data.face_similarity) : detailRow('Face status', data.face_status || '—')),
+				detailRow('Tampering status', data.tampering_status),
+				detailRow('Liveness score', pct(data.liveness_score)),
+				detailRow('Processing time', data.processing_time_ms != null ? data.processing_time_ms + ' ms' : null),
+				detailRow('Notes', data.notes || data.review_notes),
+				detailRow('Created', data.created_at)
+			].join('');
+
+			const factorsRes = await apiRequest(`/api/v1/screenings/${encodeURIComponent(id)}/factors`, { silent: true });
+			if (factorsRes.ok && Array.isArray(factorsRes.data) && factorsRes.data.length) {
+				const factorRows = factorsRes.data.map(f => (
+					`<div class="detail-row"><dt>${esc(f.factor_name)} <span class="sev ${esc(String(f.severity || '').toLowerCase())}">${esc(f.severity || '')}</span></dt><dd>${esc(f.description || '')}</dd></div>`
+				)).join('');
+				detailBody.insertAdjacentHTML('beforeend', `<div class="detail-section">Risk factors</div>${factorRows}`);
+			}
+		}
+
+		const btnCloseDetail = document.querySelector('#btn-close-detail');
+		if (btnCloseDetail) btnCloseDetail.onclick = () => detailScreen.classList.remove('visible');
+		if (detailScreen) {
+			detailScreen.onclick = e => {
+				if (e.target === detailScreen) detailScreen.classList.remove('visible');
+			};
+		}
+		document.querySelectorAll('#detail-actions .da-btn').forEach(btn => {
+			btn.onclick = () => updateScreeningDecision(btn.getAttribute('data-decision'));
+		});
+
+		// ==========================================================================
+		// 8. FACE VERIFICATION PREVIEW & CAPTURE
+		// ==========================================================================
+		const faceUploadBtn = document.querySelector('#face-upload');
+		const faceFileInput = document.querySelector('#face-file');
+		const identityVisual = document.querySelector('#identity-visual');
+		const verificationState = document.querySelector('#verification-state');
+		const matchScore = document.querySelector('#match-score');
+		const meterFill = document.querySelector('#verification-meter-fill');
+
+		faceUploadBtn.onclick = () => faceFileInput.click();
+		faceFileInput.onchange = () => {
+			const file = faceFileInput.files[0];
+			if (!file) return;
+
+			activeFaceFile = file;
+			if (activeFaceUrl) URL.revokeObjectURL(activeFaceUrl);
+			activeFaceUrl = URL.createObjectURL(file);
+
+			const image = document.createElement('img');
+			image.alt = 'Selected applicant face';
+			image.src = activeFaceUrl;
+
+			const caption = document.createElement('small');
+			caption.textContent = 'Face portrait armed for screening';
+
+			identityVisual.replaceChildren(image, caption);
+			verificationState.textContent = 'Armed for check';
+			verificationState.className = 'verification-state';
+			showToast('Face photo loaded. Submit a document to run ArcFace match');
+		};
+
+		// ==========================================================================
+		// 9. DOCUMENT SCREENING (POST /api/v1/screen)
+		// ==========================================================================
+		const dropZone = document.querySelector('#drop');
+		const fileInput = document.querySelector('#files');
+		const browseBtn = document.querySelector('#browse');
+		const uploadIcon = document.querySelector('#upload-icon');
+		const dropTitle = document.querySelector('#drop-title');
+
+		function getSelectedType() {
+			const activeBtn = document.querySelector('.types .selected');
+			return activeBtn ? (activeBtn.getAttribute('data-type') || 'passport') : 'passport';
+		}
+
+		document.querySelectorAll('.types button').forEach(button => {
+			button.onclick = () => {
+				document.querySelectorAll('.types button').forEach(b => b.classList.remove('selected'));
+				button.classList.add('selected');
+				const label = (button.textContent || '').trim() || (button.getAttribute('data-type') || '').toUpperCase();
+				showToast(label + ' selected');
+			};
+		});
+
+		browseBtn.onclick = () => fileInput.click();
+		fileInput.onchange = () => fileInput.files[0] && handleScreeningSubmission(fileInput.files[0]);
+
+		['dragenter', 'dragover'].forEach(name => {
+			dropZone.addEventListener(name, e => {
+				e.preventDefault();
+				dropZone.classList.add('dragging');
+			});
+		});
+
+		['dragleave', 'drop'].forEach(name => {
+			dropZone.addEventListener(name, e => {
+				e.preventDefault();
+				dropZone.classList.remove('dragging');
+			});
+		});
+
+		dropZone.addEventListener('drop', e => {
+			if (e.dataTransfer && e.dataTransfer.files[0]) {
+				handleScreeningSubmission(e.dataTransfer.files[0]);
+			}
+		});
+
+		async function handleScreeningSubmission(file) {
+			if (file.size > 10 * 1024 * 1024) {
+				showToast('File exceeds maximum size of 10 MB');
+				return;
+			}
+
+			if (!authToken) {
+				showToast('Sign in with your officer credentials first');
+				openLoginModal();
+				return;
+			}
+
+			if (screeningInProgress) {
+				showToast('A screening is already in progress — please wait');
+				return;
+			}
+
+			screeningInProgress = true;
+			dropTitle.textContent = 'Processing with AI engine...';
+			uploadIcon.textContent = '⏳';
+			dropZone.classList.add('processing');
+			try {
+				showToast(`Sending ${file.name} to screening engine...`);
+
+				const formData = new FormData();
+				formData.append('document_image', file);
+				formData.append('document_type', getSelectedType());
+				if (activeFaceFile) {
+					formData.append('live_photo', activeFaceFile);
+				}
+
+				const res = await apiRequest('/api/v1/screen', {
+					method: 'POST',
+					form: formData,
+					timeoutMs: 180000,
+					silent: true
+				});
+
+				if (!res.ok) {
+					if (res.status === 0) {
+						showToast('Engine unreachable — document was not screened');
+					} else if (res.status === 503 || res.status >= 500) {
+						showToast(`Engine busy (${res.status}) — document was not screened`);
+					} else {
+						showToast(`Screening failed (${res.status}): ${res.message}`);
+					}
+					return;
+				}
+
+				const result = res.data || {};
+				const risk = result.risk_assessment || {};
+				const score = risk.score;
+				const decision = risk.decision || '';
+				const face = result.face_verification || {};
+
+				// Face Verification Panel — only real engine output, and only
+				// when the officer actually supplied a live photo for comparison
+				const faceSupplied = !!activeFaceFile;
+				if (faceSupplied && face.similarity_score != null) {
+					const pctVal = Math.max(0, Math.min(100, Math.round(face.similarity_score * 100)));
+					matchScore.textContent = pctVal + '%';
+					meterFill.style.width = pctVal + '%';
+					verificationState.textContent = face.matched === true ? 'Verified' : (face.matched === false ? 'Mismatch' : (face.status || 'Result'));
+					verificationState.className = 'verification-state ' + (face.matched === true ? 'verified' : face.matched === false ? 'flagged' : '');
+				} else if (faceSupplied) {
+					verificationState.textContent = 'No face comparison returned';
+					verificationState.className = 'verification-state';
+				} else {
+					verificationState.textContent = 'No face photo supplied';
+					verificationState.className = 'verification-state';
+				}
+
+				// Prepend the real record to the Recent Feed
+				screeningRows.prepend(renderScreeningRow({
+					id: result.request_id || Date.now(),
+					request_id: result.request_id || '',
+					document_type: getSelectedType(),
+					document_number: result.document?.document_number || '',
+					mrz_source: result.mrz?.source || (result.document?.mrz_source || 'none'),
+					risk_score: score,
+					risk_level: risk.level,
+					decision,
+					created_at: result.created_at || new Date().toISOString()
+				}));
+
+				showToast(`Screening Completed · Score: ${score != null ? score : '—'} · Decision: ${decision || '—'}`);
+				await fetchDashboardStats('24h');
+				await fetchRecentScreenings();
+			} finally {
+				dropTitle.textContent = 'Drop a document to begin';
+				uploadIcon.textContent = '↑';
+				dropZone.classList.remove('processing');
+				screeningInProgress = false;
+			}
+		}
+
+		// ==========================================================================
+		// 10. GENERAL NAVIGATION & USER ACTIONS
+		// ==========================================================================
+		document.querySelector('#btn-new-screening').onclick = () => {
+			document.querySelector('#screening').scrollIntoView({ behavior: 'smooth' });
+		};
+
+		document.querySelector('#view-all').onclick = e => {
+			e.preventDefault();
+			document.querySelector('#queue').scrollIntoView({ behavior: 'smooth' });
+			showToast('Viewing all screenings');
+		};
+
+		document.querySelector('#notifications').onclick = async () => {
+			if (!authToken) {
+				showToast('Sign in with your officer credentials first');
+				openLoginModal();
+				return;
+			}
+			const res = await apiRequest('/api/v1/notifications', { silent: true });
+			if (res.ok) {
+				const items = Array.isArray(res.data) ? res.data : [];
+				showToast(items.length ? `${items.length} notification${items.length === 1 ? '' : 's'} from central command` : 'No new notifications');
+			} else {
+				showToast('Could not load notifications from backend');
+			}
+		};
+
+		document.querySelector('#help').onclick = () => {
+			showToast('Instructions: 1. Add selfie portrait (optional) 2. Select document type 3. Upload document to screen');
+		};
+
+		document.querySelectorAll('nav a').forEach(link => {
+			link.onclick = async event => {
+				const targetId = link.getAttribute('href');
+				if (targetId === '#watchlists') {
+					event.preventDefault();
+					if (!authToken) {
+						showToast('Sign in with your officer credentials first');
+						openLoginModal();
+						return;
+					}
+					const res = await apiRequest('/api/v1/watchlists', { silent: true });
+					if (res.ok) {
+						const items = Array.isArray(res.data) ? res.data : [];
+						showToast(`Watchlists active · ${items.length} flagged entr${items.length === 1 ? 'y' : 'ies'} monitored`);
+					} else {
+						showToast('Could not load watchlists from backend');
+					}
+					return;
+				}
+
+				const target = document.querySelector(targetId);
+				if (target) {
+					event.preventDefault();
+					document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+					link.classList.add('active');
+					target.scrollIntoView({ behavior: 'smooth' });
+				} else {
+					event.preventDefault();
+					showToast(link.textContent.replace(/[^a-zA-Z\s]/g, '').trim() + ' section active');
+				}
+			};
+		});
+
+		// Dynamic UTC timestamp update
+		function updateTimestamp() {
+			const now = new Date();
+			const options = { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short' };
+			const formatted = now.toLocaleDateString('en-GB', options).toUpperCase().replace(',', '');
+			const el = document.querySelector('#live-timestamp');
+			if (el) el.innerHTML = `${formatted.replace(/(\d{4})/, '$1 <b></b>')}`;
+		}
+		updateTimestamp();
+		setInterval(updateTimestamp, 60000);
+
+		// ==========================================================================
+		// INITIALIZE ON LOAD & LIVE RE-SYNC
+		// ==========================================================================
+		async function refreshAllDashboardData() {
+			await Promise.allSettled([
+				fetchDashboardStats('24h'),
+				fetchRecentScreenings(),
+				fetchReportSummary()
+			]);
+		}
+
+		(async () => {
+			await checkBackendHealth();
+			if (authToken) {
+				const restored = await restoreSession();
+				if (restored) {
+					await refreshAllDashboardData();
+				}
+			}
+		})();
+
+		setInterval(async () => {
+			const wasOnline = backendReachable;
+			await checkBackendHealth();
+			if (!wasOnline && backendReachable && authToken) {
+				await refreshAllDashboardData();
+			}
+		}, 25000);
+	</script>
+</body>
+</html>
