@@ -152,6 +152,16 @@ def create_app(
         version="1.2.0",
         lifespan=lifespan,
     )
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "https://delicate-babka-74b206.netlify.app",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.state.settings = settings
     app.state.database = database
