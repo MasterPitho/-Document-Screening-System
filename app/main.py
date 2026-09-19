@@ -149,6 +149,15 @@ def create_app(
     settings.validate()
     set_up_logging(settings.log_level, settings.api_env)
 
+    # Dump the native (C) stack to stderr if a C extension segfaults. A crash
+    # in cv2/onnxruntime kills the worker without a Python traceback, which used
+    # to look identical to an external OOM kill; this makes the two distinct.
+    try:
+        import faulthandler
+        faulthandler.enable()
+    except Exception:  # pragma: no cover - faulthandler is stdlib and rare to miss
+        pass
+
     database = database or build_database(
         settings.database_url, connect_timeout_s=settings.db_connect_timeout)
     model_manager = model_manager or ModelManager(settings)
