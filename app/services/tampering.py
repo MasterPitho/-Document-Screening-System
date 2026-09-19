@@ -166,6 +166,14 @@ class TamperingDetector:
             block = 32
             if h < block * 2 or w < block * 2:
                 return {"score": 0.0, "suspicious": False, "blocks_compared": 0}
+            # Bound the patch grid so a large document cannot create a
+            # quadratic CPU spike on a small cloud worker.
+            max_dim = 900
+            if max(h, w) > max_dim:
+                resize_scale = max_dim / float(max(h, w))
+                small = cv2.resize(small, None, fx=resize_scale, fy=resize_scale,
+                                   interpolation=cv2.INTER_AREA)
+                h, w = small.shape
             xs = range(0, w - block, block // 2)
             ys = range(0, h - block, block // 2)
             patches: Dict[tuple[int, int], np.ndarray] = {}
@@ -180,8 +188,9 @@ class TamperingDetector:
             keys = list(patches.keys())
             duplicates = 0
             compared = 0
-            for i in range(min(len(keys), 400)):
-                for j in range(i + 1, min(len(keys), i + 40)):
+            max_keys = min(len(keys), 250)
+            for i in range(max_keys):
+                for j in range(i + 1, min(max_keys, i + 20)):
                     compared += 1
                     a = patches[keys[i]].astype(np.float32)
                     b = patches[keys[j]].astype(np.float32)
