@@ -15,6 +15,7 @@ returns a controlled 503 instead of a stack trace.
 from __future__ import annotations
 
 import time
+import io
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
@@ -32,6 +33,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 from app.api.auth import (
     as_user_out,
@@ -333,7 +335,36 @@ def _register_routes(app: FastAPI) -> None:
             if live_photo:
                 await live_photo.close()
 
+        # Keep expensive CV/OCR work bounded even when the uploaded file is a
+        # very large 10 MB image. The original bytes are validated first, then
+        # analysis uses a capped working copy to avoid Render worker kills.
+        def prepare_working_image(image_bytes: bytes, label: str) -> bytes:
+            max_side = 1800
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    img.load()
+                    original_size = img.size
+                    img = img.convert("RGB")
+                    if max(original_size) <= max_side:
+                        return image_bytes
+                    img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                    out = io.BytesIO()
+                    img.save(out, format="JPEG", quality=88, optimize=True)
+                    logger.info("screen_image_resized", request_id=request_id,
+                                image=label, original_size=str(original_size),
+                                working_size=str(img.size))
+                    return out.getvalue()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("screen_image_resize_failed", request_id=request_id,
+                               image=label, type=type(exc).__name__)
+                return image_bytes
+
+        doc_bytes = prepare_working_image(doc_bytes, "document")
+        if live_bytes:
+            live_bytes = prepare_working_image(live_bytes, "live_photo")
+
         # 1. Tampering analysis (multi-signal, heuristic)
+        stage_started = time.perf_counter()
         try:
             tamper_result = tampering_detector.analyze(doc_bytes)
         except Exception:  # noqa: BLE001 - fail safe, never crash the pipeline
@@ -343,9 +374,12 @@ def _register_routes(app: FastAPI) -> None:
                 "explanation": ["Tampering analysis failed; secondary inspection required."],
                 "analysis_type": "multi-signal heuristic",
             }
+        logger.info("screen_stage_completed", request_id=request_id, stage="tampering",
+                    duration_ms=int((time.perf_counter() - stage_started) * 1000))
         tamper_result["module_state"] = risk_mod.tampering_module_state(tamper_result)
 
         # 2. Face verification (ArcFace embeddings; NOT_AVAILABLE if no model)
+        stage_started = time.perf_counter()
         try:
             face_result = model_manager.face_engine.verify(
                 doc_bytes, live_bytes, operator_name="insightface-arcface")
@@ -355,18 +389,24 @@ def _register_routes(app: FastAPI) -> None:
                 "matched": None,
                 "explanation": "Face recognition failed internally; secondary inspection required.",
             }
+        logger.info("screen_stage_completed", request_id=request_id, stage="face_verification",
+                    duration_ms=int((time.perf_counter() - stage_started) * 1000))
         face_result["module_state"] = risk_mod.face_module_state(face_result)
 
         # 3. Passive liveness (PAD) on the live capture; in-memory only.
+        stage_started = time.perf_counter()
         try:
             liveness_detection = liveness_detector.analyze(live_bytes or b"")
         except Exception:  # noqa: BLE001 - fail safe
             liveness_detection = liveness_detector._not_checked(
                 "Liveness analysis failed internally.")
         liveness_result = liveness_detection.to_dict()
+        logger.info("screen_stage_completed", request_id=request_id, stage="liveness",
+                    duration_ms=int((time.perf_counter() - stage_started) * 1000))
         liveness_result["module_state"] = risk_mod.liveness_module_state(liveness_result)
 
         # 4. MRZ / document parse: submitted lines, otherwise the parser strategy.
+        stage_started = time.perf_counter()
         mrz_result = {}
         if mrz_line1 and mrz_line2:
             mrz_data = mrz_mod.parse_td3_mrz(
@@ -389,6 +429,8 @@ def _register_routes(app: FastAPI) -> None:
             else:
                 mrz_result = mrz_mod.extract_mrz_from_image(
                     doc_bytes, settings, document_type=document_type)
+        logger.info("screen_stage_completed", request_id=request_id, stage="mrz",
+                    duration_ms=int((time.perf_counter() - stage_started) * 1000))
         mrz_result["module_state"] = risk_mod.mrz_module_state(mrz_result)
 
         # 4b. Cross-signal consistency evaluation
