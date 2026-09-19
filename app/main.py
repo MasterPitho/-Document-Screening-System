@@ -141,7 +141,6 @@ def create_app(
         yield
 
 
-    from fastapi.middleware.cors import CORSMiddleware
     app = FastAPI(
         title="Document Screening Engine",
         description=(
@@ -169,15 +168,11 @@ def create_app(
     app.state.token_repo = token_repo
     app.state.resource_limiter = ResourceLimiter(settings)
 
+    #CORS
     cors_origins = list(settings.cors_origins) if settings.cors_origins else []
 
-    # Allow Netlify frontend
-    cors_origins.append(
-      "https://delicate-babka-74b206.netlify.app"
-    )
-
-    # Allow local frontend during development
     cors_origins.extend([
+        "https://delicate-babka-74b206.netlify.app",
         "http://127.0.0.1:5500",
         "http://localhost:5500",
     ])
@@ -185,7 +180,7 @@ def create_app(
     # Remove duplicates
     cors_origins = list(dict.fromkeys(cors_origins))
 
-    allow_credentials = settings.cors_allow_credentials and "*" not in cors_origins
+    allow_credentials=True
 
     app.add_middleware(
         CORSMiddleware,
