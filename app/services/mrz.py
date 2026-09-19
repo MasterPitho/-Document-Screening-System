@@ -402,12 +402,11 @@ class TD3PassportParser(BaseDocumentParser):
                 mrz_crop.close()
             candidates: list[str] = []
             for variant in variants:
-                for page_mode in (6, 7, 11):
-                    ocr_text = pytesseract.image_to_string(
-                        variant,
-                        config=f"--psm {page_mode} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<",
-                    )
-                    candidates.extend(_ocr_candidates(ocr_text))
+                ocr_text = pytesseract.image_to_string(
+                    variant,
+                    config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+                )
+                candidates.extend(_ocr_candidates(ocr_text))
         except Exception:
             raw = {
                 "detected": False,
