@@ -106,6 +106,23 @@ def peak_rss_mb() -> Optional[float]:
         return None
 
 
+def peak_child_rss_mb() -> Optional[float]:
+    """Peak RSS of waited-for child processes (e.g. the tesseract OCR binary).
+
+    The parent's ``ru_maxrss`` is blind to subprocess memory: tesseract does
+    the heavy OCR in a child process, whose RAM still counts against the
+    container cgroup. If a child spikes, the whole 512 MB budget is exceeded
+    and the kernel SIGKILLs the container -- parent RSS looks fine.
+    """
+    try:
+        import resource
+        # RUSAGE_CHILDREN reports the max RSS across terminated, waited children.
+        rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        return round(rss / 1024.0, 1)
+    except Exception:  # pragma: no cover - non-POSIX platforms
+        return None
+
+
 def prepare_working_image(image_bytes: bytes, label: str) -> bytes:
     """Cap an uploaded image's longest side for in-memory analysis.
 
@@ -361,7 +378,8 @@ def _register_routes(app: FastAPI) -> None:
         request_id = getattr(request.state, "request_id", get_request_id(request))
         started_at = time.perf_counter()
         logger.info("screen_request_received", request_id=request_id,
-                    endpoint="/api/v1/screen", rss_mb=peak_rss_mb())
+                    endpoint="/api/v1/screen", rss_mb=peak_rss_mb(),
+                    child_rss_mb=peak_child_rss_mb())
         if bool(mrz_line1) != bool(mrz_line2):
             raise HTTPException(
                 status_code=400,
@@ -411,7 +429,7 @@ def _register_routes(app: FastAPI) -> None:
             }
         logger.info("screen_stage_completed", request_id=request_id, stage="tampering",
                     duration_ms=int((time.perf_counter() - stage_started) * 1000),
-                    rss_mb=peak_rss_mb())
+                    rss_mb=peak_rss_mb(), child_rss_mb=peak_child_rss_mb())
         tamper_result["module_state"] = risk_mod.tampering_module_state(tamper_result)
 
         # 2. Face verification (ArcFace embeddings; NOT_AVAILABLE if no model)
@@ -427,7 +445,7 @@ def _register_routes(app: FastAPI) -> None:
             }
         logger.info("screen_stage_completed", request_id=request_id, stage="face_verification",
                     duration_ms=int((time.perf_counter() - stage_started) * 1000),
-                    rss_mb=peak_rss_mb())
+                    rss_mb=peak_rss_mb(), child_rss_mb=peak_child_rss_mb())
         face_result["module_state"] = risk_mod.face_module_state(face_result)
 
         # 3. Passive liveness (PAD) on the live capture; in-memory only.
@@ -440,7 +458,7 @@ def _register_routes(app: FastAPI) -> None:
         liveness_result = liveness_detection.to_dict()
         logger.info("screen_stage_completed", request_id=request_id, stage="liveness",
                     duration_ms=int((time.perf_counter() - stage_started) * 1000),
-                    rss_mb=peak_rss_mb())
+                    rss_mb=peak_rss_mb(), child_rss_mb=peak_child_rss_mb())
         liveness_result["module_state"] = risk_mod.liveness_module_state(liveness_result)
 
         # 4. MRZ / document parse: submitted lines, otherwise the parser strategy.
@@ -469,7 +487,7 @@ def _register_routes(app: FastAPI) -> None:
                     doc_bytes, settings, document_type=document_type)
         logger.info("screen_stage_completed", request_id=request_id, stage="mrz",
                     duration_ms=int((time.perf_counter() - stage_started) * 1000),
-                    rss_mb=peak_rss_mb())
+                    rss_mb=peak_rss_mb(), child_rss_mb=peak_child_rss_mb())
         mrz_result["module_state"] = risk_mod.mrz_module_state(mrz_result)
 
         # 4b. Cross-signal consistency evaluation
@@ -569,7 +587,8 @@ def _register_routes(app: FastAPI) -> None:
         logger.info("screen_request_completed", request_id=request_id,
                     risk_level=risk["level"], risk_score=risk["score"],
                     processing_time_ms=processing_time_ms,
-                    decision=risk["decision"], rss_mb=peak_rss_mb())
+                    decision=risk["decision"], rss_mb=peak_rss_mb(),
+                    child_rss_mb=peak_child_rss_mb())
         return response
 
     # ---- Auth -------------------------------------------------------------

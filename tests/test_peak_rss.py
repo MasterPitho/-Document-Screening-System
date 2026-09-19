@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from app.main import peak_rss_mb
+from app.main import peak_child_rss_mb, peak_rss_mb
 
 
 def test_peak_rss_reports_value_on_posix_or_none_elsewhere() -> None:
@@ -14,3 +14,12 @@ def test_peak_rss_reports_value_on_posix_or_none_elsewhere() -> None:
     else:
         assert value is not None
         assert value > 0
+
+
+def test_peak_child_rss_reports_value_on_posix_or_none_elsewhere() -> None:
+    value = peak_child_rss_mb()
+    if sys.platform.startswith("win"):
+        assert value is None
+    else:
+        assert value is not None
+        assert value >= 0
