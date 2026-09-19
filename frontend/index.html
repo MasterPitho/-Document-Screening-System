@@ -131,8 +131,8 @@
 						<h3 id="drop-title">Drop a document to begin</h3>
 						<p id="drop-subtitle">or select a file from this device</p>
 						<button class="outline" id="browse" type="button">Browse files</button>
-						<input id="files" type="file" hidden accept="image/*,.pdf">
-						<small>JPG, PNG or PDF <span>Max 10 MB</span></small>
+						<input id="files" type="file" hidden accept="image/jpeg,image/png,image/webp">
+						<small>JPG, PNG or WebP <span>Max 10 MB</span></small>
 					</div>
 					<label class="accepted">Accepted documents</label>
 					<div class="types">
@@ -154,12 +154,12 @@
 						<div class="axis">100<br><br>75<br><br>50<br><br>25<br><br>0</div>
 						<div class="graph">
 							<div class="lines"></div>
-							<svg viewBox="0 0 500 150" preserveAspectRatio="none">
-								<path class="fill" d="M0 120C30 118 35 83 65 91S91 102 110 80S145 94 162 68S194 83 215 58S247 71 270 48S302 69 326 45S360 55 378 34S410 56 432 27S470 47 500 13V150H0Z"/>
-								<path class="stroke" d="M0 120C30 118 35 83 65 91S91 102 110 80S145 94 162 68S194 83 215 58S247 71 270 48S302 69 326 45S360 55 378 34S410 56 432 27S470 47 500 13"/>
+							<svg id="risk-trend-svg" viewBox="0 0 500 150" preserveAspectRatio="none" aria-label="Live risk score trend">
+								<path class="fill" d="M0 150L0 140L500 140L500 150Z"/>
+								<path class="stroke" d="M0 140L500 140"/>
 							</svg>
-							<div class="times">
-								<span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>Now</span>
+							<div class="times" id="risk-trend-times">
+								<span>—</span><span>—</span><span>—</span><span>—</span><span>Now</span>
 							</div>
 						</div>
 					</div>
@@ -668,11 +668,36 @@
 		const statAvgRisk = document.querySelector('#stat-avg-risk');
 		const statHighRisk = document.querySelector('#stat-high-risk');
 
+		function renderRiskTrend(timeline) {
+			const svg = document.querySelector('#risk-trend-svg');
+			const times = document.querySelector('#risk-trend-times');
+			if (!svg || !times) return;
+			const rows = Array.isArray(timeline) ? timeline : [];
+			if (!rows.length) {
+				svg.innerHTML = '<path class="fill" d="M0 150L0 140L500 140L500 150Z"/><path class="stroke" d="M0 140L500 140"/>';
+				times.innerHTML = '<span>—</span><span>—</span><span>—</span><span>—</span><span>Now</span>';
+				return;
+			}
+			const points = rows.map((row, i) => {
+				const x = rows.length === 1 ? 250 : (i / (rows.length - 1)) * 500;
+				const risk = Math.max(0, Math.min(100, Number(row.risk_score) || 0));
+				const y = 140 - (risk * 1.2);
+				return [x, y];
+			});
+			const line = points.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+			const fill = line + ' L500 150 L0 150 Z';
+			svg.innerHTML = '<path class="fill" d="' + fill + '"/><path class="stroke" d="' + line + '"/>';
+			const labels = rows.map(r => esc(r.timestamp || ''));
+			const display = labels.length >= 5 ? [labels[0], labels[Math.floor((labels.length-1)/3)], labels[Math.floor(2*(labels.length-1)/3)], labels[labels.length-1], 'Now'] : labels;
+			times.innerHTML = display.map(label => '<span>' + label + '</span>').join('');
+		}
+
 		async function fetchDashboardStats(range = '24h') {
 			if (!authToken) return;
 			const res = await apiRequest(`/api/v1/stats/trend?range=${range}`, { silent: true });
 			if (!res.ok) return;
 			const data = res.data || {};
+			renderRiskTrend(data.timeline);
 			if (data.today_total != null) metricToday.textContent = data.today_total;
 			if (data.delta_today_pct != null) {
 				const isUp = data.delta_today_pct >= 0;
