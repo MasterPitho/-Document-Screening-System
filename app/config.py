@@ -59,6 +59,10 @@ class Settings:
     allowed_image_types: set[str]
     allowed_image_extensions: set[str]
 
+    # PDF uploads (rendered to a bounded first-page JPEG before screening)
+    max_pdf_bytes: int
+    pdf_render_max_dimension: int
+
     # MRZ
     mrz_confidence_threshold: float
     mrz_year_pivot: int
@@ -130,6 +134,7 @@ class Settings:
             "DOCUMENT_TYPE_MISMATCH": _int_value("RISK_DOCUMENT_TYPE_MISMATCH", 30),
             "QR_OCR_CONFLICT": _int_value("RISK_QR_OCR_CONFLICT", 35),
             "SUSPICIOUS_FIELD_TAMPERING": _int_value("RISK_SUSPICIOUS_FIELD_TAMPERING", 25),
+            "ON_WATCHLIST": _int_value("RISK_ON_WATCHLIST", 40),
         }
 
         return cls(
@@ -152,6 +157,8 @@ class Settings:
                                       os.getenv("ALLOWED_IMAGE_EXTENSIONS",
                                                 "jpg,jpeg,png,webp").split(",")
                                       if e.strip()},
+            max_pdf_bytes=_int_value("MAX_PDF_BYTES", 20 * 1024 * 1024),
+            pdf_render_max_dimension=_int_value("PDF_RENDER_MAX_DIMENSION", 4096),
             mrz_confidence_threshold=_float_value("MRZ_CONFIDENCE_THRESHOLD", 0.70),
             mrz_year_pivot=_int_value("MRZ_YEAR_PIVOT", 50),
             face_similarity_threshold=_float_value(
@@ -208,6 +215,9 @@ class Settings:
                "MAX_IMAGE_WIDTH and MAX_IMAGE_HEIGHT must be greater than zero")
         _check(bool(self.allowed_image_types), "ALLOWED_IMAGE_TYPES cannot be empty")
         _check(bool(self.allowed_image_extensions), "ALLOWED_IMAGE_EXTENSIONS cannot be empty")
+        _check(self.max_pdf_bytes > 0, "MAX_PDF_BYTES must be greater than zero")
+        _check(self.pdf_render_max_dimension > 0,
+               "PDF_RENDER_MAX_DIMENSION must be greater than zero")
         _check(0.0 <= self.mrz_confidence_threshold <= 1.0,
                "MRZ_CONFIDENCE_THRESHOLD must be between 0 and 1")
         _check(0 <= self.mrz_year_pivot <= 100, "MRZ_YEAR_PIVOT must be between 0 and 100")
@@ -248,6 +258,7 @@ class Settings:
             "MRZ_LOW_CONFIDENCE", "IMAGE_QUALITY", "MODULE_ERROR", "UNKNOWN_MODULE",
             "LIVENESS_FAILED", "LIVENESS_UNCERTAIN",
             "DOCUMENT_TYPE_MISMATCH", "QR_OCR_CONFLICT", "SUSPICIOUS_FIELD_TAMPERING",
+            "ON_WATCHLIST",
         }
         _check(required_factors.issubset(self.risk_weights.keys()),
                "Risk weight mapping is missing required factors")

@@ -27,6 +27,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
@@ -55,9 +56,12 @@ from app.db.repositories import (
     AuditLogRepository,
     AuthTokenRepository,
     DuplicateRequestError,
+    LedgerRepository,
+    NotificationRepository,
     PersistenceError,
     ScreeningRepository,
     UserRepository,
+    WatchlistRepository,
 )
 from app.logging_setup import redact_mrz, set_up_logging
 from app.models.schemas import (
@@ -76,7 +80,9 @@ from app.models.schemas import (
     ScreeningStats,
     TimelinePoint,
     UserOut,
+    WatchlistCreate,
     WatchlistItem,
+    WatchlistUpdate,
 )
 from app.security.image_validation import ImageValidationLimits
 from app.services import mrz as mrz_mod
@@ -222,11 +228,23 @@ def create_app(
     audit_repo = AuditLogRepository(database)
     user_repo = UserRepository(database)
     token_repo = AuthTokenRepository(database)
+    watchlist_repo = WatchlistRepository(database)
+    notification_repo = NotificationRepository(database)
+    ledger_repo = LedgerRepository(database)
 
     # Development/test convenience: cheap schema ensure. In production the
     # Docker entrypoint runs `alembic upgrade head`; failures here (e.g. an
     # unreachable PostgreSQL) are ignored and surfaced via /ready.
     database_ready = database.create_all(fail_silently=True)
+    if database_ready:
+        try:
+            watchlist_repo.seed_defaults()
+        except Exception:  # noqa: BLE001 - seeding is best-effort
+            logger.warning("watchlist_seed_failed")
+        try:
+            ledger_repo.seed_genesis()
+        except Exception:  # noqa: BLE001 - seeding is best-effort
+            logger.warning("ledger_genesis_failed")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -275,6 +293,9 @@ def create_app(
     app.state.audit_repo = audit_repo
     app.state.user_repo = user_repo
     app.state.token_repo = token_repo
+    app.state.watchlist_repo = watchlist_repo
+    app.state.notification_repo = notification_repo
+    app.state.ledger_repo = ledger_repo
     app.state.resource_limiter = ResourceLimiter(settings)
 
     #CORS
@@ -421,19 +442,44 @@ def _register_routes(app: FastAPI) -> None:
                 detail="mrz_line1 and mrz_line2 must be provided together (both or neither).",
             )
 
-        allowed_document_types = {"auto", "td3", "passport", "td1", "national_id", "aadhaar", "pan"}
+        allowed_document_types = {"auto", "td3", "passport", "td2", "visa", "td1", "national_id", "aadhaar", "pan"}
         document_type = (document_type or "auto").strip().lower() or "auto"
         if document_type not in allowed_document_types:
             raise HTTPException(
                 status_code=422,
                 detail="document_type must be one of: "
-                       "auto, td3/passport, td1/national_id/aadhaar, pan.",
+                       "auto, td3/passport, td2/visa, td1/national_id/aadhaar, pan.",
             )
 
+        from app.services import pdf as pdf_util
+        is_pdf = pdf_util.is_pdf_content_type(
+            document_image.content_type, document_image.filename)
         try:
-            doc_bytes = await document_image.read(validation_limits.max_bytes + 1)
-            validation_limits.validate(doc_bytes, document_image.content_type,
-                                       "Document image", document_image.filename)
+            read_limit = (settings.max_pdf_bytes if is_pdf
+                          else validation_limits.max_bytes) + 1
+            raw_doc_bytes = await document_image.read(read_limit)
+            if is_pdf and len(raw_doc_bytes) > settings.max_pdf_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail="PDF exceeds the maximum allowed size.")
+            if is_pdf:
+                doc_bytes = pdf_util.render_first_page(
+                    raw_doc_bytes,
+                    max_dimension=settings.pdf_render_max_dimension)
+                if doc_bytes is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="The uploaded PDF could not be rendered; "
+                               "upload a clean single-page scan or an image.")
+                effective_content_type = "image/jpeg"
+                effective_filename = "document_page_1.jpg"
+            else:
+                doc_bytes = raw_doc_bytes
+                effective_content_type = document_image.content_type
+                effective_filename = document_image.filename
+            validation_limits.validate(
+                doc_bytes, effective_content_type, "Document image",
+                effective_filename)
             live_bytes: Optional[bytes] = None
             if live_photo:
                 live_bytes = await live_photo.read(validation_limits.max_bytes + 1)
@@ -503,8 +549,16 @@ def _register_routes(app: FastAPI) -> None:
         stage_started = time.perf_counter()
         mrz_result = {}
         if mrz_line1 and mrz_line2:
-            mrz_data = mrz_mod.parse_td3_mrz(
-                mrz_line1, mrz_line2, year_pivot=settings.mrz_year_pivot)
+            if len(mrz_line1) == 36 and len(mrz_line2) == 36:
+                mrz_data = mrz_mod.parse_td2_visa(
+                    mrz_line1, mrz_line2, year_pivot=settings.mrz_year_pivot)
+                mrz_format = "TD2"
+                mrz_doc_type = "VISA"
+            else:
+                mrz_data = mrz_mod.parse_td3_mrz(
+                    mrz_line1, mrz_line2, year_pivot=settings.mrz_year_pivot)
+                mrz_format = "TD3"
+                mrz_doc_type = "PASSPORT"
             valid = mrz_data.get("status") == "VALID"
             mrz_result = {
                 "detected": bool(valid),
@@ -514,8 +568,8 @@ def _register_routes(app: FastAPI) -> None:
                 "line1": redact_mrz(mrz_line1),
                 "line2": redact_mrz(mrz_line2),
                 "data": mrz_data,
-                "format": "TD3",
-                "document_type": "PASSPORT",
+                "format": mrz_format,
+                "document_type": mrz_doc_type,
             }
         else:
             if document_type == "auto":
@@ -538,6 +592,24 @@ def _register_routes(app: FastAPI) -> None:
             face_result=face_result,
         )
 
+        # 4c. Watchlist match (normalized document-number equality; privacy-safe).
+        watchlist_match = None
+        mrz_data_inner = mrz_result.get("data")
+        if isinstance(mrz_data_inner, dict):
+            doc_number = mrz_data_inner.get("passport_number") or mrz_data_inner.get("document_number")
+            if doc_number:
+                watchlist_repo: Optional[WatchlistRepository] = getattr(
+                    state, "watchlist_repo", None)
+                if watchlist_repo is not None:
+                    watchlist_match = watchlist_repo.match(doc_number)
+        extra_risk_factors = None
+        if watchlist_match is not None:
+            extra_risk_factors = [{
+                "factor": "ON_WATCHLIST",
+                "detail": f"Document matched watchlist entry {watchlist_match.id} "
+                          f"(severity {watchlist_match.severity}).",
+            }]
+
         # 5. Deterministic, explainable risk decision.
         risk = risk_engine.evaluate(
             mrz_result=mrz_result,
@@ -546,6 +618,7 @@ def _register_routes(app: FastAPI) -> None:
             liveness_result=liveness_result,
             cross_signal_result=cross_result,
             image_quality=1.0,
+            extra_factors=extra_risk_factors,
         )
 
         processing_time_ms = int((time.perf_counter() - started_at) * 1000)
@@ -559,6 +632,7 @@ def _register_routes(app: FastAPI) -> None:
                 "format": str(mrz_result.get("format", "UNKNOWN")),
                 "type": str(mrz_result.get("document_type") or ("PASSPORT" if mrz_result.get("detected") else "UNKNOWN")),
                 "document_type": str(mrz_result.get("document_type", "UNKNOWN")),
+                "converted_from_pdf": bool(is_pdf),
             },
             "modules": {
                 "tampering_analysis": tamper_result,
@@ -571,6 +645,11 @@ def _register_routes(app: FastAPI) -> None:
                 },
             },
             "risk_assessment": risk,
+            "watchlist": None if watchlist_match is None else {
+                "match": True,
+                "watchlist_id": watchlist_match.id,
+                "severity": watchlist_match.severity,
+            },
             "mrz": privacy_mrz,
             "tampering_analysis": tamper_result,
             "face_verification": face_result,
@@ -602,6 +681,39 @@ def _register_routes(app: FastAPI) -> None:
                 user_id=current_user.id,
             )
             response["persistence"] = {"status": "stored", "screening_id": screening.id}
+            notif_repo: Optional[NotificationRepository] = getattr(
+                state, "notification_repo", None)
+            if notif_repo is not None:
+                try:
+                    note = notif_repo.create_for_screening(screening)
+                    if note is not None:
+                        response["persistence"]["notification_id"] = note.id
+                except Exception:  # noqa: BLE001 - notifications are best-effort
+                    logger.error("notification_create_failed", request_id=request_id)
+            ledger_repo: Optional[LedgerRepository] = getattr(
+                state, "ledger_repo", None)
+            if ledger_repo is not None:
+                try:
+                    ledger_payload = {
+                        "request_id": request_id,
+                        "screening_id": screening.id,
+                        "document_type": str(response["document"].get("type", "UNKNOWN")),
+                        "mrz_status": str(mrz_result.get("status", "NOT_DETECTED")),
+                        "face_status": str(face_result.get("status", "NOT_AVAILABLE")),
+                        "tampering_status": str(tamper_result.get("status", "CLEAN")),
+                        "liveness_status": str(liveness_result.get("liveness_status", "NOT_CHECKED")),
+                        "risk_score": int(risk["score"]),
+                        "risk_level": str(risk["level"]),
+                        "decision": str(risk["decision"]),
+                        "status_color": str(risk["status"]),
+                        "watchlist_hit": bool(watchlist_match is not None),
+                    }
+                    ledger_entry = ledger_repo.append(
+                        entry_type="SCREENING", payload=ledger_payload,
+                        request_id=request_id)
+                    response["persistence"]["ledger_index"] = ledger_entry.entry_index
+                except Exception:  # noqa: BLE001 - ledger is best-effort
+                    logger.error("ledger_append_failed", request_id=request_id)
         except DuplicateRequestError:
             logger.warning("duplicate_request_id", request_id=request_id)
             raise HTTPException(status_code=409,
@@ -834,56 +946,172 @@ def _register_routes(app: FastAPI) -> None:
             by_risk_level=summary["by_risk_level"],
         )
 
+    CSV_EXPORT_COLUMNS = [
+        "screening_id", "request_id", "created_at", "processing_time_ms",
+        "document_type", "mrz_status", "face_status", "face_similarity",
+        "tampering_status", "tampering_score", "liveness_status",
+        "liveness_score", "risk_score", "risk_level", "decision",
+        "status_color", "mrz_source", "notes",
+    ]
+
+    @app.get("/api/v1/report/export.csv")
+    def export_csv(
+        request: Request,
+        date_from: Optional[datetime.date] = None,
+        date_to: Optional[datetime.date] = None,
+        _current_user=Depends(get_current_user),
+    ) -> Response:
+        repo: ScreeningRepository = request.app.state.screening_repo
+        rows = repo.export_rows(date_from=date_from, date_to=date_to)
+        import csv
+        import io as _io
+        buffer = _io.StringIO()
+        buffer.write("\ufeff")
+        writer = csv.writer(buffer, lineterminator="\n")
+        writer.writerow(CSV_EXPORT_COLUMNS)
+        for row in rows:
+            writer.writerow([row.get(col, "") for col in CSV_EXPORT_COLUMNS])
+        filename = (f"document_screening_export_"
+                    f"{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     # ---- Dashboard alerts & watchlists ------------------------------------
     @app.get("/api/v1/notifications", response_model=list[NotificationItem])
     def get_notifications(
         request: Request,
         limit: int = Query(10, ge=1, le=100),
+        offset: int = Query(0, ge=0),
         unread_only: bool = Query(False),
         _current_user=Depends(get_current_user),
     ) -> list[NotificationItem]:
-        repo: ScreeningRepository = request.app.state.screening_repo
-        items = repo.recent_notifications(limit=limit, unread_only=unread_only)
-        return [NotificationItem(**item) for item in items]
+        repo: NotificationRepository = request.app.state.notification_repo
+        _, rows = repo.list(limit=limit, offset=offset, unread_only=unread_only)
+        return [NotificationItem(
+            id=str(n.id), type=n.type, message=n.message,
+            created_at=n.created_at.isoformat() if n.created_at else "",
+            read=bool(n.read),
+        ) for n in rows]
+
+    @app.patch("/api/v1/notifications/{notification_id}/read",
+               response_model=NotificationItem)
+    def mark_notification_read(
+        request: Request,
+        notification_id: int,
+        _current_user=Depends(get_current_user),
+    ) -> NotificationItem:
+        repo: NotificationRepository = request.app.state.notification_repo
+        note = repo.mark_read(notification_id)
+        if note is None:
+            raise HTTPException(status_code=404, detail="Notification not found.")
+        return NotificationItem(
+            id=str(note.id), type=note.type, message=note.message,
+            created_at=note.created_at.isoformat() if note.created_at else "",
+            read=bool(note.read),
+        )
+
+    # ---- Ledger (hash chain) ----------------------------------------------
+    @app.get("/api/v1/ledger/head")
+    def ledger_head(request: Request,
+                    _current_user=Depends(get_current_user)) -> Optional[dict]:
+        repo: LedgerRepository = request.app.state.ledger_repo
+        head = repo.head()
+        if head is None:
+            return None
+        return {
+            "entry_index": head.entry_index,
+            "entry_hash": head.entry_hash,
+            "prev_hash": head.prev_hash,
+            "entry_type": head.entry_type,
+            "created_at": head.created_at.isoformat() if head.created_at else "",
+            "payload": head.payload,
+        }
+
+    @app.get("/api/v1/ledger")
+    def ledger_list(request: Request,
+                    limit: int = Query(50, ge=1, le=500),
+                    offset: int = Query(0, ge=0),
+                    _current_user=Depends(get_current_user)) -> dict:
+        repo: LedgerRepository = request.app.state.ledger_repo
+        total, rows = repo.list(limit=limit, offset=offset)
+        items = [{
+            "entry_index": e.entry_index,
+            "entry_hash": e.entry_hash,
+            "prev_hash": e.prev_hash,
+            "entry_type": e.entry_type,
+            "created_at": e.created_at.isoformat() if e.created_at else "",
+            "payload": e.payload,
+            "request_id": e.request_id,
+        } for e in rows]
+        return {"items": items, "total": total}
+
+    @app.get("/api/v1/ledger/verify")
+    def ledger_verify(request: Request,
+                      _current_user=Depends(get_current_user)) -> dict:
+        repo: LedgerRepository = request.app.state.ledger_repo
+        return repo.verify()
 
     @app.get("/api/v1/watchlists", response_model=list[WatchlistItem])
     def get_watchlists(
         request: Request,
+        search: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
         _current_user=Depends(get_current_user),
     ) -> list[WatchlistItem]:
-        default_watchlists = [
-            {
-                "id": 1,
-                "name": "Tehran Ali",
-                "document_number": "V-449021",
-                "reason": "Lookout circular",
-                "severity": "HIGH",
-                "created_at": "2026-09-01T10:00:00Z",
-                "is_demo_data": True,
-                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
-            },
-            {
-                "id": 2,
-                "name": "Marcus Vance",
-                "document_number": "P8831042",
-                "reason": "Interpol Red Notice alert",
-                "severity": "CRITICAL",
-                "created_at": "2026-09-05T14:20:00Z",
-                "is_demo_data": True,
-                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
-            },
-            {
-                "id": 3,
-                "name": "Elena Rostova",
-                "document_number": "E7719203",
-                "reason": "Stolen blank passport registry",
-                "severity": "HIGH",
-                "created_at": "2026-09-08T09:15:00Z",
-                "is_demo_data": True,
-                "source": "DEMO_DATA_NOT_FOR_OPERATIONAL_USE",
-            },
-        ]
-        return [WatchlistItem(**w) for w in default_watchlists]
+        repo: WatchlistRepository = request.app.state.watchlist_repo
+        if search:
+            _, rows = repo.search(search)
+        else:
+            _, rows = repo.list(limit=limit, offset=offset)
+        return [_to_watchlist_item(entry) for entry in rows]
+
+    @app.post("/api/v1/watchlists", response_model=WatchlistItem, status_code=201)
+    def create_watchlist(
+        request: Request,
+        body: WatchlistCreate,
+        _current_user=Depends(require_role("officer", "supervisor")),
+    ) -> WatchlistItem:
+        repo: WatchlistRepository = request.app.state.watchlist_repo
+        entry = repo.create(
+            name=body.name.strip(),
+            document_number=body.document_number.strip(),
+            reason=body.reason.strip(),
+            severity=body.severity,
+        )
+        return _to_watchlist_item(entry)
+
+    @app.patch("/api/v1/watchlists/{entry_id}", response_model=WatchlistItem)
+    def update_watchlist(
+        request: Request,
+        entry_id: int,
+        body: WatchlistUpdate,
+        _current_user=Depends(require_role("officer", "supervisor")),
+    ) -> WatchlistItem:
+        repo: WatchlistRepository = request.app.state.watchlist_repo
+        entry = repo.update(
+            entry_id,
+            name=body.name.strip() if body.name else None,
+            document_number=body.document_number.strip() if body.document_number else None,
+            reason=body.reason.strip() if body.reason else None,
+            severity=body.severity,
+        )
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Watchlist entry not found.")
+        return _to_watchlist_item(entry)
+
+    @app.delete("/api/v1/watchlists/{entry_id}", status_code=204)
+    def delete_watchlist(
+        request: Request,
+        entry_id: int,
+        _current_user=Depends(require_role("officer", "supervisor")),
+    ) -> None:
+        repo: WatchlistRepository = request.app.state.watchlist_repo
+        if not repo.delete(entry_id):
+            raise HTTPException(status_code=404, detail="Watchlist entry not found.")
 
     # ---- System -----------------------------------------------------------
     @app.get("/")
@@ -914,6 +1142,19 @@ def _register_routes(app: FastAPI) -> None:
             "status": "ready" if ready else "not_ready",
             "modules": modules,
         })
+
+
+def _to_watchlist_item(entry) -> WatchlistItem:
+    return WatchlistItem(
+        id=entry.id,
+        name=entry.name,
+        document_number=entry.document_number,
+        reason=entry.reason,
+        severity=entry.severity,
+        created_at=entry.created_at.isoformat() if entry.created_at else "",
+        is_demo_data=bool(entry.is_demo_data),
+        source=entry.source,
+    )
 
 
 def to_privacy_safe_mrz(raw_mrz: dict[str, Any]) -> dict[str, Any]:

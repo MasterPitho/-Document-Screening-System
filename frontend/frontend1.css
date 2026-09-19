@@ -1655,6 +1655,262 @@ mark.hold {
 	}
 }
 
+/* ==========================================================================
+   NOTIFICATIONS DROPDOWN
+   ========================================================================== */
+
+.notif-wrap {
+	position: relative;
+	display: inline-flex;
+}
+
+#notif-badge {
+	position: absolute;
+	top: -4px;
+	right: -4px;
+	min-width: 15px;
+	height: 15px;
+	padding: 0 4px;
+	border-radius: 8px;
+	background: var(--red);
+	color: #fff;
+	font-size: 9px;
+	font-weight: 700;
+	font-style: normal;
+	line-height: 15px;
+	text-align: center;
+}
+
+.notif-panel {
+	position: absolute;
+	top: calc(100% + 10px);
+	right: 0;
+	width: min(360px, calc(100vw - 32px));
+	max-height: 340px;
+	overflow-y: auto;
+	background: var(--card);
+	border: 1px solid var(--card-border);
+	border-radius: 6px;
+	box-shadow: 0 16px 40px rgba(11, 52, 69, 0.28);
+	z-index: 60;
+}
+
+.notif-empty {
+	padding: 22px 16px;
+	text-align: center;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.notif-item {
+	display: block;
+	width: 100%;
+	padding: 12px 14px;
+	text-align: left;
+	border: 0;
+	border-bottom: 1px solid var(--line);
+	background: var(--card);
+	color: var(--ink);
+	cursor: pointer;
+	transition: background 0.15s ease;
+}
+
+.notif-item:last-child {
+	border-bottom: 0;
+}
+
+.notif-item:hover {
+	background: var(--card-hover);
+}
+
+.notif-item strong {
+	display: block;
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--teal);
+	margin-bottom: 4px;
+}
+
+.notif-item span {
+	display: block;
+	font-size: 12px;
+	line-height: 1.4;
+}
+
+.notif-item small {
+	display: block;
+	margin-top: 5px;
+	color: var(--muted);
+	font-size: 10px;
+}
+
+/* ==========================================================================
+   LEDGER
+   ========================================================================== */
+
+.ledger-section {
+	margin-bottom: 24px;
+}
+
+.ledger-head {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 14px;
+	margin: 18px 0;
+}
+
+.ledger-head span {
+	padding: 14px 16px;
+	border: 1px solid var(--card-border);
+	border-radius: 4px;
+	background: var(--paper);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.ledger-head span.wide {
+	grid-column: span 2;
+}
+
+.ledger-head small {
+	display: block;
+	color: var(--muted);
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.ledger-head b {
+	display: block;
+	margin-top: 8px;
+	color: var(--ink);
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.verify-banner {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	padding: 13px 16px;
+	margin-bottom: 16px;
+	border-radius: 4px;
+	font-size: 12px;
+}
+
+.verify-banner.ok {
+	background: var(--green-light);
+	color: var(--green);
+	border: 1px solid var(--green);
+}
+
+.verify-banner.bad {
+	background: var(--red-light);
+	color: var(--red);
+	border: 1px solid var(--red);
+}
+
+.verify-banner b {
+	font-size: 12px;
+}
+
+.mono {
+	font-family: Consolas, "Cascadia Code", monospace;
+	font-size: 11px;
+	letter-spacing: 0.02em;
+}
+
+@media (max-width: 960px) {
+	.ledger-head {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 520px) {
+	.ledger-head {
+		grid-template-columns: 1fr;
+	}
+	.ledger-head span.wide {
+		grid-column: auto;
+	}
+}
+
+/* ==========================================================================
+   WATCHLISTS
+   ========================================================================== */
+
+.watchlist-panel {
+	margin-bottom: 24px;
+}
+
+.watchlist-add {
+	display: grid;
+	grid-template-columns: 1.2fr 1.2fr 1.4fr 130px auto;
+	gap: 10px;
+	margin: 16px 0;
+}
+
+.watchlist-add input,
+.watchlist-add select {
+	padding: 10px 12px;
+	border: 1px solid var(--border-soft);
+	border-radius: 4px;
+	background: var(--paper);
+	color: var(--ink);
+	font: inherit;
+	font-size: 12px;
+	transition: border-color 0.15s ease, outline 0.15s ease;
+}
+
+.watchlist-add input:focus,
+.watchlist-add select:focus {
+	border-color: var(--teal);
+	outline: 2px solid var(--teal);
+	outline-offset: 1px;
+}
+
+.wl-sev {
+	padding: 4px 6px;
+	border: 1px solid var(--border-soft);
+	border-radius: 3px;
+	background: var(--paper);
+	color: var(--ink);
+	font-size: 11px;
+	font-family: inherit;
+}
+
+@media (max-width: 960px) {
+	.watchlist-add {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+
+@media (max-width: 520px) {
+	.watchlist-add {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* ==========================================================================
+   REPORT ACTIONS (CSV EXPORT)
+   ========================================================================== */
+
+.report-actions {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+@media (max-width: 520px) {
+	.report-actions {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+}
+
 #detail-screen::-webkit-scrollbar,
 .detail-card::-webkit-scrollbar {
 	width: 6px;

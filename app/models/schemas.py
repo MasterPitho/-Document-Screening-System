@@ -5,7 +5,7 @@ Pydantic response/request schemas for the screening API.
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -122,7 +122,7 @@ class ScreenResponse(BaseModel):
     status: str
     request_id: str
     processing_time_ms: int
-    document: dict[str, str]
+    document: dict[str, Any]
     modules: dict[str, Any]
     risk_assessment: RiskAssessment
     mrz: MRZValidationResult
@@ -248,6 +248,20 @@ class WatchlistItem(BaseModel):
     created_at: str
     is_demo_data: bool = True
     source: str = "DEMO_DATA_NOT_FOR_OPERATIONAL_USE"
+
+
+class WatchlistCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    document_number: str = Field(min_length=3, max_length=64)
+    reason: str = Field(default="", max_length=500)
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "MEDIUM"
+
+
+class WatchlistUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    document_number: Optional[str] = Field(default=None, min_length=3, max_length=64)
+    reason: Optional[str] = Field(default=None, max_length=500)
+    severity: Optional[Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]] = None
 
 
 class ScreeningFactorOut(BaseModel):

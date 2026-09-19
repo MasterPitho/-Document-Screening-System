@@ -114,6 +114,67 @@ class Screening(Base):
     )
 
 
+class WatchlistEntry(Base):
+    """Manually curated watchlist records; matched against screened numbers."""
+
+    __tablename__ = "watchlist_entries"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(120), nullable=False)
+    document_number = Column(String(64), nullable=False)
+    document_number_normalized = Column(String(64), nullable=False)
+    reason = Column(Text, nullable=False, default="")
+    severity = Column(String(10), nullable=False, default="MEDIUM")  # LOW|MEDIUM|HIGH|CRITICAL
+    is_demo_data = Column(Boolean, nullable=False, default=False)
+    source = Column(String(50), nullable=False, default="MANUAL_ENTRY")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_watchlist_doc_number_normalized", document_number_normalized),
+    )
+
+
+class Notification(Base):
+    """Persisted dashboard alert linked to a screening (read-state owned here)."""
+
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    type = Column(String(40), nullable=False, default="HIGH_RISK_ALERT")
+    message = Column(Text, nullable=False, default="")
+    read = Column(Boolean, nullable=False, default=False)
+    screening_id = Column(
+        Integer,
+        ForeignKey("screenings.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_notifications_created_at", created_at),
+        Index("ix_notifications_read", read),
+    )
+
+
+class LedgerEntry(Base):
+    """One immutable hash-chain record; payload stores risk metadata only (never PII)."""
+
+    __tablename__ = "ledger_entries"
+
+    id = Column(Integer, primary_key=True)
+    entry_index = Column(Integer, unique=True, nullable=False)
+    prev_hash = Column(String(64), nullable=False)
+    entry_hash = Column(String(64), nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    entry_type = Column(String(24), nullable=False, default="SCREENING")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    request_id = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_ledger_entry_index", entry_index),
+    )
+
+
 class ScreeningFactor(Base):
     """One risk factor surfaced by a screening, normalized for reporting."""
 

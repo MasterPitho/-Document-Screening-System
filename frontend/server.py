@@ -3,8 +3,10 @@ import socketserver
 import urllib.request
 import urllib.error
 
-BACKEND = "https://document-screening-system-3tvd.onrender.com"
-PORT = 3000
+import os
+
+BACKEND = os.environ.get("BACKEND", "https://document-screening-system-3tvd.onrender.com")
+PORT = int(os.environ.get("PORT", "3000"))
 ROOT = "."
 
 EXCLUDED_HEADERS = {"host", "origin", "connection", "content-length", "accept-encoding", "http2-settings", "proxy-connection", "upgrade"}

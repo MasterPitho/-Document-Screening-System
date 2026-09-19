@@ -48,6 +48,8 @@ PASSPORT_MIN_RATIO = 1.45
 PARSER_ALIASES: dict[str, str] = {
     "td3": "passport",
     "passport": "passport",
+    "td2": "visa",
+    "visa": "visa",
     "td1": "national_id",
     "national_id": "national_id",
     "aadhaar": "aadhaar",
@@ -292,6 +294,90 @@ def parse_td1_national_id(line1: str, line2: str, line3: str, year_pivot: int = 
         "gender": gender,
         "expiry_date": expiry_raw,
         "optional_data": line3[0:15].replace("<", " ").strip(),
+        "is_expired": is_expired,
+        "checks": checks,
+    }
+
+
+def _td2_lines_valid(line1: str, line2: str) -> bool:
+    return (
+        len(line1) == 36
+        and len(line2) == 36
+        and _valid_mrz_chars(line1)
+        and _valid_mrz_chars(line2)
+        and line2[10:13].isalpha()
+        and line2[13:19].isdigit()
+        and line2[21:27].isdigit()
+        and line2[20] in {"M", "F", "<"}
+        and valid_date(line2[13:19])
+        and valid_date(line2[21:27])
+    )
+
+
+def parse_td2_visa(line1: str, line2: str, year_pivot: int = 50) -> dict[str, Any]:
+    """Parse and validate ICAO 9303 TD2 (2x36) visa lines.
+
+    Line 1: 0-1 doc type, 2-4 issuing country, 5-35 name field (31 chars).
+    Line 2: 0-8 document number, 9 check; 10-12 nationality; 13-18 DOB, 19 check;
+    20 sex; 21-26 expiry, 27 check; 28-34 optional data, 35 composite check.
+    """
+    if len(line1) != 36 or len(line2) != 36:
+        return {"status": "MALFORMED",
+                "error": "TD2 lines must each contain exactly 36 characters."}
+    if not _td2_lines_valid(line1, line2):
+        return {"status": "MALFORMED",
+                "error": "TD2 structure or characters are invalid."}
+
+    doc_type = line1[0:2].replace("<", "")
+    issuing_country = line1[2:5].replace("<", "")
+    name_field = line1[5:36]
+    name_parts = name_field.split("<<")
+    surname = name_parts[0].replace("<", " ").strip()
+    given_names = name_parts[1].replace("<", " ").strip() if len(name_parts) > 1 else ""
+
+    document_number = line2[0:9].replace("<", "")
+    dob_raw = line2[13:19]
+    gender = line2[20].replace("<", "X")
+    expiry_raw = line2[21:27]
+    optional_data = line2[28:35].replace("<", " ").strip()
+
+    valid_number = verify_mrz_field(line2[0:9], line2[9])
+    valid_dob = verify_mrz_field(dob_raw, line2[19])
+    valid_expiry = verify_mrz_field(expiry_raw, line2[27])
+    composite_data = line2[0:10] + line2[13:20] + line2[21:28] + line2[28:35]
+    valid_composite = verify_mrz_field(composite_data, line2[35])
+
+    birth_date_valid = valid_date(dob_raw, year_pivot=year_pivot)
+    expiry_date_valid = valid_date(expiry_raw, year_pivot=year_pivot)
+    try:
+        exp_date = datetime.date(
+            mrz_year_full(int(expiry_raw[0:2]), year_pivot=year_pivot),
+            int(expiry_raw[2:4]),
+            int(expiry_raw[4:6]),
+        )
+        is_expired = exp_date < datetime.date.today()
+    except ValueError:
+        is_expired = False
+
+    checks = {
+        "document_number_valid": valid_number,
+        "dob_valid": valid_dob and birth_date_valid,
+        "expiry_valid": valid_expiry and expiry_date_valid,
+        "composite_valid": valid_composite,
+    }
+    status = "VALID" if all(checks.values()) else "INVALID"
+
+    return {
+        "status": status,
+        "doc_type": doc_type,
+        "issuing_country": issuing_country,
+        "full_name": f"{given_names} {surname}".strip(),
+        "document_number": document_number,
+        "nationality": line2[10:13].replace("<", ""),
+        "date_of_birth": dob_raw,
+        "gender": gender,
+        "expiry_date": expiry_raw,
+        "optional_data": optional_data,
         "is_expired": is_expired,
         "checks": checks,
     }
@@ -717,6 +803,108 @@ class NationalIDTD1Parser(BaseDocumentParser):
 NationalIDParser = NationalIDTD1Parser  # backward-compatible alias
 
 
+class VisaTD2Parser(BaseDocumentParser):
+    """ICAO 9303 TD2 (2x36) visa parser. Explicit type only (td2/visa)."""
+
+    name = "visa"
+    document_type = "VISA"
+    format = "TD2"
+
+    def can_parse(self, image_bgr: np.ndarray) -> bool:
+        if image_bgr is None or image_bgr.size == 0:
+            return False
+        height, width = image_bgr.shape[:2]
+        if height <= 0:
+            return False
+        return (width / height) >= PASSPORT_MIN_RATIO
+
+    def parse(
+        self,
+        image: Any,
+        settings: Optional[Settings] = None,
+        line1: Optional[str] = None,
+        line2: Optional[str] = None,
+        line3: Optional[str] = None,
+        **kwargs: Any,
+    ) -> DocumentParseResult:
+        if settings is None:
+            settings = Settings.from_env()
+        if line1 is not None and line2 is not None:
+            return self._from_lines(line1, line2, settings)
+        image_bytes: bytes = image if isinstance(image, bytes) else _encode_bgr(image)
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("L")
+            width, height = image.size
+            crop = image.crop((0, int(height * 0.55), width, height))
+            crop = crop.resize((width * 2, max(1, crop.height * 2)))
+            try:
+                ocr_text = pytesseract.image_to_string(
+                    ImageEnhance.Contrast(crop).enhance(2.0),
+                    config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<")
+            finally:
+                image.close()
+                crop.close()
+            lines = [_clean_mrz_line(l) for l in ocr_text.splitlines()
+                     if len(_clean_mrz_line(l)) == 36]
+            unique = list(dict.fromkeys(lines))
+            for i, first in enumerate(unique):
+                for j, second in enumerate(unique):
+                    if i == j:
+                        continue
+                    if not _td2_lines_valid(first, second):
+                        continue
+                    parsed = parse_td2_visa(first, second,
+                                            year_pivot=settings.mrz_year_pivot)
+                    if parsed.get("status") == "VALID":
+                        return self._from_lines(first, second, settings)
+        except Exception:
+            raw = {"detected": False, "source": "ocr", "status": "OCR_FAILED",
+                   "confidence": 0.0, "reason": "MRZ OCR unavailable; secondary inspection required."}
+            return self._result(raw)
+        raw = {"detected": False, "source": "ocr", "status": "NOT_DETECTED",
+               "confidence": 0.0,
+               "reason": "No valid TD2 (2x36) visa MRZ could be extracted."}
+        return self._result(raw)
+
+    def _from_lines(self, line1: str, line2: str, settings: Settings) -> DocumentParseResult:
+        parsed = parse_td2_visa(line1, line2, year_pivot=settings.mrz_year_pivot)
+        checks = parsed.get("checks")
+        checks_valid = bool(isinstance(checks, dict) and all(checks.values()))
+        status = str(parsed.get("status", "MALFORMED"))
+        raw = {
+            "detected": bool(checks_valid),
+            "source": "form",
+            "status": status,
+            "confidence": 1.0 if checks_valid else 0.5,
+            "line1": line1,
+            "line2": line2,
+            "data": parsed,
+            "validation": {
+                "structure_valid": bool(status not in {"MALFORMED", "INVALID"}),
+                "checksums_valid": checks_valid,
+                "dates_valid": bool(isinstance(checks, dict)
+                                    and checks.get("dob_valid")
+                                    and checks.get("expiry_valid")),
+            },
+        }
+        return self._result(raw)
+
+    def _result(self, raw: dict[str, Any]) -> DocumentParseResult:
+        result = dict(raw)
+        result["format"] = self.format
+        result["document_type"] = self.document_type
+        return DocumentParseResult(
+            detected=bool(result.get("detected", False)),
+            status=str(result.get("status", "NOT_DETECTED")),
+            document_type=self.document_type,
+            format=self.format,
+            confidence=float(result.get("confidence", 0.0)),
+            data=dict(result.get("data", {})),
+            raw=result,
+            error=None if result.get("detected") else str(result.get("reason", "")),
+        )
+
+
 class UnknownDocumentParser(BaseDocumentParser):
     """Fallback strategy returned when auto-routing cannot identify document type."""
 
@@ -772,6 +960,8 @@ class DocumentParserRouter:
                 self._parsers["passport"] = TD3PassportParser()
             elif key == "national_id":
                 self._parsers["national_id"] = NationalIDTD1Parser()
+            elif key == "visa":
+                self._parsers["visa"] = VisaTD2Parser()
             elif key == "aadhaar":
                 from app.services.aadhaar import AadhaarDocumentParser
                 self._parsers["aadhaar"] = AadhaarDocumentParser()
@@ -792,7 +982,7 @@ class DocumentParserRouter:
         if key is None:
             raise ValueError(
                 "document_type must be one of: auto, "
-                "td3/passport, td1/national_id, aadhaar, pan.")
+                "td3/passport, td2/visa, td1/national_id, aadhaar, pan.")
         return key
 
     def score_evidence(

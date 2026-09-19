@@ -110,6 +110,7 @@ class RiskEngine:
         image_quality: float = 1.0,
         liveness_result: Optional[Dict[str, Any]] = None,
         cross_signal_result: Optional[Any] = None,
+        extra_factors: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         score = [0]
         factors: List[Dict[str, Any]] = []
@@ -196,6 +197,12 @@ class RiskEngine:
                 fdetail = csf.get("detail", "")
                 if fname:
                     self.add_factor(fname, fdetail, factors, score)
+
+        # ---- Externally supplied factors (e.g. watchlist match) ----
+        for ef in (extra_factors or []):
+            fname = ef.get("factor")
+            if fname:
+                self.add_factor(fname, ef.get("detail", ""), factors, score)
 
         module_statuses = {
             "mrz": mrz_module_state(mrz_result),

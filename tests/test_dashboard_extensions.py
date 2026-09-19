@@ -269,6 +269,11 @@ def test_notifications_and_watchlists(app_and_client):
         mrz_source="ocr",
     )
 
+    # Notifications are created by the API's best-effort hook after a high-risk
+    # screen persists; mirror that hook for the direct repo-created screening.
+    notif_repo = app.state.notification_repo
+    notif_repo.create_for_screening(repo.get_by_request_id("high-risk-test-doc-001"))
+
     # Notifications endpoint
     notif_resp = client.get("/api/v1/notifications?limit=5", headers=headers)
     assert notif_resp.status_code == 200

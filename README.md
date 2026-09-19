@@ -1,6 +1,8 @@
 # Document Screening Engine
 
- It validates machine-readable identity documents, runs a multi-signal image-forensics pipeline, verifies faces with **InsightFace ArcFace embeddings** (ONNX Runtime), adds **passive presentation-attack (liveness) screening**, and computes a transparent, deterministic risk score. It is **not** a guarantee of document authenticity and **not** an autonomous identity decision; a trained human officer remains the final decision maker.
+Say you have a stack of identity documents to check at a window. This engine takes a photo of one, reads its machine-readable zone, runs a few image-forensics checks, and — when a live photo is provided — compares the face using **InsightFace ArcFace embeddings** (ONNX Runtime). A **passive liveness** pass looks for printed photos and screen re-captures. Everything folds into one deterministic, explainable risk score.
+
+Two things to set straight up front: this is **not** a guarantee that a document is authentic, and it **never** makes the final identity call by itself. A trained human officer stays in the loop and decides.
 
 ## 1. Problem Statement
 
@@ -15,7 +17,7 @@
 
 Screen a physical identity document through **multi-modal triage** — a machine-readable zone (MRZ), digital image forensics, and biometric face matching — and fuse the signals into one explainable decision, **without persisting sensitive PII or raw biometrics**:
 
-1. **Physical-document channel:** parse ICAO 9303 MRZ (TD3 passports today), validate structure, checksums, and dates; OCR-fallback when the zone is not typed in.
+1. **Physical-document channel:** parse ICAO 9303 MRZ (TD3 passports and TD2 visas today), validate structure, checksums, and dates; OCR-fallback when the zone is not typed in.
 2. **Heuristic digital-forensics channel:** ELA, compression, noise, edge, copy-move, and metadata signals that localize *suspected* regions (never a forgery classifier).
 3. **Biometric channel:** ArcFace face verification of the document photograph against an optional live capture, plus **passive liveness** (texture/FFT/colour forensics, ONNX anti-spoofing when a model is present) to screen for printouts and screen recaptures.
 4. **Privacy constraint:** all analysis executes strictly in memory. Raw images, embeddings, MRZ text, passport numbers and names are never stored or logged.
@@ -29,10 +31,11 @@ Screen a physical identity document through **multi-modal triage** — a machine
 ### 1d. Multi-Document Engine Architecture
 
 - **TD3 Passports (ICAO 9303):** Two 44-character MRZ lines, OCR candidate filtering, 7-3-1 check digits, impossible-date & pivot-year expiry validation.
+- **TD2 Visas (ICAO 9303):** Two 36-character MRZ lines with the same checksum, date, and OCR-fallback rules; selectable as `td2`/`visa`.
 - **TD1 National Identity Cards (ICAO 9303):** Three 30-character MRZ lines, check digits, and structural layout.
 - **Aadhaar Cards (UIDAI):** Dedicated layout anchor detection, Verhoeff checksum algorithm on 12-digit UID numbers, masked identity representation (`XXXX-XXXX-1234`), and embedded QR payload parsing. **Disclaimer:** Aadhaar screening verifies structural validity (`STRUCTURALLY_VALID`) only via Verhoeff checksum and layout anchors; it does not connect to UIDAI servers, query CIDR or e-KYC databases, and does not claim official government authentication.
 - **PAN Cards (Income Tax Dept of India):** Dedicated 10-character alphanumeric regex (`[A-Z]{5}[0-9]{4}[A-Z]`), 4th character entity type validation (`P`=Individual, `C`=Company, `H`=HUF, `F`=Firm, `A`=AOP, etc.), masked identity (`ABCPXXXX4F`), and anchor recognition.
-- **Router Contract:** Multi-signal evidence-based auto routing. Parser is selected either by explicit `document_type` (`auto | td3 | passport | td1 | national_id | aadhaar | pan`) or, in `auto` mode, by a multi-factor evidence score combining visual aspect ratio, QR signatures, and OCR text/anchors. If evidence is ambiguous or no identity anchors are detected (e.g. blank/noise images), the router safely falls back to `UNKNOWN` document type and `NOT_DETECTED` status. Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through `BaseDocumentParser`.
+- **Router Contract:** Multi-signal evidence-based auto routing. Parser is selected either by explicit `document_type` (`auto | td3 | passport | td2 | visa | td1 | national_id | aadhaar | pan`) or, in `auto` mode, by a multi-factor evidence score combining visual aspect ratio, QR signatures, and OCR text/anchors. If evidence is ambiguous or no identity anchors are detected (e.g. blank/noise images), the router safely falls back to `UNKNOWN` document type and `NOT_DETECTED` status. Each parser implements `parse(image_bytes, settings) -> DocumentParseResult` through `BaseDocumentParser`.
 
 ### 1e. Security Boundaries
 
@@ -42,13 +45,15 @@ Screen a physical identity document through **multi-modal triage** — a machine
 
 ## Current Scope
 
-- **Multi-Document Support:** TD3 passports, TD1 ID cards, Aadhaar cards (with Verhoeff checksum & masked UID), and PAN cards (with 4th-char entity validation & masked PAN).
+- **Multi-Document Support:** TD3 passports, TD2 visas, TD1 ID cards, Aadhaar cards (with Verhoeff checksum & masked UID), and PAN cards (with 4th-char entity validation & masked PAN).
 - **Embedded QR Code Analysis:** OpenCV-based QR detection with adaptive preprocessing, payload classification (`AADHAAR_XML`, `SECURE_AADHAAR_NUMERIC`, `GENERIC_URL`, `GENERIC_TEXT`), and privacy-safe masked summaries.
 - **Cross-Signal Consistency Engine:** Validates requested document type vs detected document structure, cross-checks QR payload vs OCR metadata, and detects spatial tampering overlapping identity text / MRZ regions.
 - **Multi-Signal Image Forensics:** ELA, JPEG compression, noise, edge, lightweight copy-move (duplicate-region), and metadata presence.
 - **Face Verification & Liveness:** InsightFace ArcFace embeddings (`buffalo_sc` model via ONNX Runtime), passive presentation-attack detection (MiniFASNet ONNX or OpenCV texture/frequency fallback).
 - **Deterministic Risk Engine:** Weighted factors with explicit, documented weights. Weights are heuristic prototype values, not calibrated probabilities.
-- **Zero-PII Storage:** Fully compliant database and audit schema with no raw MRZ lines, document numbers, applicant names, biometric vectors, or image persistence.
+- **Watchlist Matching:** an operator-managed watchlist (document numbers, reasons, severities); matching entries push the risk score up and flag the screening for review.
+- **Unread Notifications & Audit Ledger:** high-risk screenings create notifications; every screening is chained into a SHA-256 integrity ledger that can be verified.
+- **Zero-PII Storage:** Fully compliant database and audit schema with no raw MRZ lines, document numbers, applicant names, biometric vectors, or image persistence. PDFs are rendered to a single image in memory and the source image is not retained.
 
 ## Processing Pipeline
 
@@ -57,9 +62,12 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
     -> QR Code Analysis (OpenCV detector + adaptive preprocessing + payload classification)
     -> Document Parser Router (aspect ratio / layout anchors / document_type)
          -> TD3 Passport: MRZ form input or Tesseract OCR candidate pipeline
+         -> TD2 Visa: 2x36 MRZ form input or Tesseract OCR candidate pipeline
          -> TD1 National ID: 3-line MRZ structure + check digits
          -> Aadhaar Card: UIDAI layout anchors + Verhoeff checksum + masked UID
          -> PAN Card: Income Tax layout anchors + 10-char entity regex + masked PAN
+         -> PDF upload: render first page to an image, then run the normal pipeline
+    -> Watchlist cross-check against operator-managed entries
     -> Image Forensics: ELA + compression + noise + edges + copy-move + metadata
     -> Face Verification: InsightFace ArcFace embeddings (doc photo vs live photo)
     -> Passive Liveness (PAD): ONNX anti-spoofing or OpenCV texture/frequency fallback
@@ -68,6 +76,7 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
          - QR payload vs OCR identity consistency
          - Spatial tampering overlap with identity / MRZ regions
     -> Deterministic, Explainable Risk Engine (weights, module gates, liveness gate)
+    -> Notifications for high-risk results + SHA-256 ledger append
     -> Role-Based Access Control (RBAC: officer, supervisor, admin)
     -> PostgreSQL-backed Zero-PII Audit Record (SQLAlchemy + Alembic migrations)
 ```
@@ -76,15 +85,15 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
 
 `app/` is the FastAPI application package. `create_app()` builds the app, its configuration, and every runtime singleton, then exposes them through `request.app.state` — components are never created at module import time (which keeps the test suite DB-independent and import-safe).
 
-- `app/main.py` — app factory and lifespan (retrying database bring-up, admin bootstrap from env vars, face-model load), plus all HTTP routes: `GET /health`, `GET /ready`, `POST /api/v1/screen`, `POST /api/v1/auth/register|login|logout`, `GET /api/v1/auth/me`, `GET /api/v1/screenings` (list + filters), `GET /api/v1/screenings/{id_or_request_id}`, `PATCH /api/v1/screenings/{item_id}/decision` (RBAC-protected officer/supervisor override), `GET /api/v1/screenings/{id_or_request_id}/factors`, `GET /api/v1/stats`, `GET /api/v1/report/summary`.
+- `app/main.py` — app factory and lifespan (retrying database bring-up, admin bootstrap from env vars, face-model load), plus all HTTP routes: `GET /health`, `GET /ready`, `POST /api/v1/screen`, `POST /api/v1/auth/register|login|logout`, `GET /api/v1/auth/me`, `GET /api/v1/screenings` (list + filters), `GET /api/v1/screenings/{id_or_request_id}`, `PATCH /api/v1/screenings/{item_id}/decision` (RBAC-protected officer/supervisor override), `GET /api/v1/screenings/{id_or_request_id}/factors`, `GET /api/v1/stats`, `GET /api/v1/report/summary`, `GET /api/v1/report/export.csv`, `GET /api/v1/notifications` + `PATCH /api/v1/notifications/{id}/read`, `GET /api/v1/ledger` / `GET /api/v1/ledger/head` / `GET /api/v1/ledger/verify`, and `GET|POST /api/v1/watchlists` / `PATCH|DELETE /api/v1/watchlists/{id}`.
 - `app/config.py` — pydantic `Settings` loaded from the environment plus the cached `get_settings()`.
 - `app/db/` — persistence layer:
   - `database.py` — the `Database` engine/session factory (`build_database`), `ping()` readiness probe, retrying `DatabaseConnector`, UTC clock helpers, and the `get_db` FastAPI dependency.
-  - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`) with indexes and strict zero-PII storage.
-  - `repositories.py` — the only module that opens sessions; one short-lived session per operation (`ScreeningRepository`, `AuditLogRepository`, `UserRepository`, `AuthTokenRepository`).
+  - `models.py` — SQLAlchemy ORM models (`User`, `AuthToken`, `Screening`, `ScreeningFactor`, `AuditLog`, `WatchlistEntry`, `Notification`, `LedgerEntry`) with indexes and strict zero-PII storage.
+  - `repositories.py` — the only module that opens sessions; one short-lived session per operation (`ScreeningRepository`, `AuditLogRepository`, `UserRepository`, `AuthTokenRepository`, `WatchlistRepository`, `NotificationRepository`, `LedgerRepository`).
 - `app/api/` — `auth.py` (register/login/logout/me, `require_role` RBAC dependency, bearer-token helpers, `extract_optional_user` for anonymous screenings) and `helpers.py` (shared request utilities).
 - `app/services/` — 
-  - `mrz.py` (strategy-based document parsers: `BaseDocumentParser`, `TD3PassportParser`, `NationalIDParser` stub, `DocumentParserRouter`, plus backward-compatible OCR)
+  - `mrz.py` (strategy-based document parsers: `BaseDocumentParser`, `TD3PassportParser`, `VisaTD2Parser`, `NationalIDParser` stub, `DocumentParserRouter`, plus backward-compatible OCR)
   - `aadhaar.py` (`AadhaarDocumentParser` with UIDAI layout anchor detection, Verhoeff checksum algorithm, and masked UID enforcement)
   - `pan.py` (`PANDocumentParser` with 10-char regex, 4th character entity type validation, and masked PAN representation)
   - `qr.py` (`QRAnalyzer` for embedded document QR detection, adaptive binarization, payload classification, and masked summaries)
@@ -93,6 +102,9 @@ Upload validation (byte size, MIME, extension, signature, pixel count, dimension
   - `face_recognition.py` (ArcFace engine behind a swappable `FaceBackend` protocol, with an injectable `DummyBackend` for tests)
   - `liveness.py` (passive ONNX + OpenCV presentation-attack screening)
   - `risk_engine.py` (weighted deterministic scoring with cross-signal consistency factors).
+  - `watchlist.py` (watchlist cross-check raising the risk score on matches).
+  - `pdf.py` (pymupdf-based first-page render for PDF uploads).
+  - `ledger.py` (SHA-256 chained integrity ledger).
 - `app/security/image_validation.py` — upload hardening (byte size, MIME, extension, signature, pixel count, dimensions, decompression bomb safety).
 - `app/models/schemas.py` — Pydantic request/response models.
 - `database.py` (repo root) — a backward-compatible shim re-exporting the `app.db` models plus `engine`/`SessionLocal`/`get_db`/`init_db` so legacy tooling imports keep working.
@@ -115,7 +127,7 @@ Open:
 - Health: `http://localhost:8000/health`
 - Readiness: `http://localhost:8000/ready`
 
-The container accepts only JPG, PNG, and WebP uploads with a 10 MB per-image limit by default. The Compose service loads optional values from a local `.env` file (see `.env.example`) and runs as a non-root user.
+The container accepts JPG, PNG, and WebP uploads up to 10 MB, and PDF documents up to 20 MB (the first page is rendered before screening). The Compose service loads optional values from a local `.env` file (see `.env.example`) and runs as a non-root user.
 
 Building the image downloads the face model (several hundred MB); the download happens once at build time, not per request.
 
@@ -152,6 +164,9 @@ Tables (managed by Alembic migrations in `alembic/`):
 - `audit_logs` — screening and lifecycle events with event type and request_id.
 - `users` — operators and admins (PBKDF2 salted hashes, never plaintext).
 - `auth_tokens` — bearer sessions (SHA-256 token hashes) with a configurable TTL.
+- `watchlist_entries` — operator-managed watchlist (name, document number, reason, severity, demo flag).
+- `notifications` — unread system alerts raised for high-risk screenings.
+- `ledger_entries` — SHA-256 chained screening records for tamper-evidence.
 
 **No raw images, biometric embeddings, MRZ text, passport numbers, or personal data are stored.** Images are processed entirely in memory.
 
@@ -168,6 +183,7 @@ Configuration is environment-driven; copy `.env.example` to `.env` and adjust as
 | `CORS_ORIGINS` | `http://localhost:3000,http://localhost:5173` | Legacy alias: `ALLOWED_ORIGINS`. |
 | `MAX_FILE_SIZE_MB` | `10` | Legacy alias for `MAX_IMAGE_BYTES`. |
 | `MAX_IMAGE_BYTES` | `10485760` | Takes precedence over `MAX_FILE_SIZE_MB`. |
+| `MAX_PDF_BYTES` | `20971520` | Size cap for PDF uploads (first page rendered before screening). |
 | `MAX_IMAGE_PIXELS` | `40000000` | |
 | `MAX_IMAGE_WIDTH` / `MAX_IMAGE_HEIGHT` | `10000` / `10000` | |
 | `ALLOWED_IMAGE_TYPES` | `image/jpeg,image/png,image/webp` | Declared MIME whitelist. |
@@ -243,13 +259,13 @@ Concurrency & Rate Limiting:
 
 Multipart form fields:
 
-- `document_image`: required JPG, PNG, or WebP document image.
+- `document_image`: required JPG, PNG, or WebP document image (a PDF is also accepted — the first page is rendered before screening).
 - `live_photo`: optional JPG, PNG, or WebP live image.
-- `mrz_line1`: optional exact TD3 line 1 (passport MRZ form path).
-- `mrz_line2`: optional exact TD3 line 2 (passport MRZ form path).
-- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td1`/`national_id`, `aadhaar`, `pan`. When `auto`, multi-signal evidence scoring evaluates visual aspect ratio, QR signatures, and OCR anchors. If anchors are absent or ambiguous (blank/noise images), it falls back safely to `UNKNOWN` document type and `NOT_DETECTED` status.
+- `mrz_line1`: optional exact MRZ line 1 (TD3 passport or TD2 visa form path).
+- `mrz_line2`: optional exact MRZ line 2 (TD3 passport or TD2 visa form path).
+- `document_type`: optional parser selector: `auto` (default), `td3`/`passport`, `td2`/`visa`, `td1`/`national_id`, `aadhaar`, `pan`. When `auto`, multi-signal evidence scoring evaluates visual aspect ratio, QR signatures, and OCR anchors. If anchors are absent or ambiguous (blank/noise images), it falls back safely to `UNKNOWN` document type and `NOT_DETECTED` status.
 
-Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td1|national_id|aadhaar|pan` returns HTTP 422.
+Supplying only one of `mrz_line1`/`mrz_line2` returns HTTP 400; the API does not silently fall back to OCR. Supplying neither falls back to OCR through the selected parser. Manually supplied lines are validated with the exact same TD3/TD2 structure, ICAO 9303 checksum, and date rules as OCR output; they are reported with `"source": "form"` (an explicit manual/testing input path). An INVALID/MALFORMED manual MRZ still forces secondary inspection. A `document_type` other than `auto|td3|passport|td2|visa|td1|national_id|aadhaar|pan` returns HTTP 422.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/screen \
@@ -259,7 +275,7 @@ curl -X POST http://localhost:8000/api/v1/screen \
   -F "live_photo=@face.jpg"
 ```
 
-A successful MRZ detection (`detected: true`, `status: VALID`) requires two exact 44-character lines passing allowed-character validation, TD3 structure validation, every ICAO 9303 check digit, and date validation. Candidates with wrong lengths are rejected; checksum-invalid or invalid-date candidates are never reported as detections.
+A successful MRZ detection (`detected: true`, `status: VALID`) requires two exact-length machine-readable lines (44 characters for TD3 passports, 36 for TD2 visas) passing allowed-character validation, structure validation, every ICAO 9303 check digit, and date validation. Candidates with wrong lengths are rejected; checksum-invalid or invalid-date candidates are never reported as detections.
 
 **Zero PII in Public Response:** The returned `mrz` block uses `PrivacySafeMRZResult`, returning only `detected`, `status`, `format`, `source`, `confidence`, `module_state`, `masked_identifier`, `country_code`, and `valid_lines`. Raw MRZ strings, full identity numbers, names, birth dates, and expiration dates are scrubbed from all API outputs.
 
@@ -297,9 +313,11 @@ Endpoints:
 - `GET /api/v1/screenings/{id_or_request_id}/factors` — the normalized risk-factor rows (name, severity, weight, description) for one screening.
 - `GET /api/v1/stats` — dashboard counts: totals, cleared, secondary inspection, high risk, MRZ failures, face mismatches, suspicious tampering, plus breakdowns by decision and risk level.
 - `GET /api/v1/stats/trend` — daily trend statistics (bearer token required).
-- `GET /api/v1/notifications` — system notifications (bearer token required).
-- `GET /api/v1/watchlists` — watchlist items flagged with `is_demo_data: true` (bearer token required).
+- `GET /api/v1/notifications` — unread system notifications; `PATCH /api/v1/notifications/{id}/read` marks one read (bearer token required).
+- `GET|POST /api/v1/watchlists` — list or add watchlist entries; `PATCH|DELETE /api/v1/watchlists/{id}` updates severity or removes an entry (bearer token required).
+- `GET /api/v1/ledger/head` — latest ledger block; `GET /api/v1/ledger` — chained entries; `GET /api/v1/ledger/verify` — verifies chain integrity (bearer token required).
 - `GET /api/v1/report/summary` — totals per risk level and decision, cleared/secondary/high-risk counts, and average processing time.
+- `GET /api/v1/report/export.csv` — the full screening report as a CSV download (bearer token required).
 
 ```bash
 curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v1/screenings?limit=10
@@ -384,13 +402,16 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The comprehensive test suite (**238 tests, 100% pass rate**) covers:
+The suite is currently **296 tests, all passing**. It covers:
 - **Aadhaar & PAN Parsing:** Verhoeff checksum validation, layout anchors, masked UID/PAN format validation (`tests/test_aadhaar_screening.py`, `tests/test_pan_screening.py`).
 - **QR Code Analysis:** Embedded QR extraction, adaptive preprocessing, payload classification, and masked summaries (`tests/test_qr_analysis.py`).
 - **Cross-Signal Consistency:** Document type mismatch, QR vs OCR conflict, spatial tampering overlap (`tests/test_cross_signal.py`).
 - **Security, Rate Limiting & RBAC:** Role-based access control (`tests/test_rbac.py`), CORS origin lockdown (`tests/test_cors_security.py`), upload security, path traversal filename protection, decompression bomb prevention, and concurrency/rate-limiting enforcement (`tests/test_security_hardening.py`).
 - **Zero-PII Compliance:** Verification that API endpoints, database tables, schemas, repositories, and audit logs never expose or persist raw names, document numbers, MRZ strings, face embeddings, or images (`tests/test_privacy_compliance.py`, `tests/test_persistence.py`).
 - **Core Pipeline:** TD3/TD1 MRZ parsing, 7-3-1 checksums, impossible-date & leap-year handling, Tesseract OCR candidate filtering, multi-signal tamper forensics, InsightFace ArcFace verification, passive liveness PAD (ONNX & OpenCV fallback), deterministic risk scoring, Alembic migrations & schema synchronization (`tests/test_migrations.py`), and database resilience.
+- **TD2 Visa Parsing:** 36-character line structure, checksums/dates, expiry handling, and the endpoint accepting visa uploads (`tests/test_visa_td2.py`).
+- **Watchlists, Notifications, Ledger & Export:** CRUD + risk scoring on matches, notification list/mark-read, ledger chain verify, CSV export formatting (`tests/test_watchlist_api.py`, `tests/test_watchlist_integration.py`, `tests/test_notifications.py`, `tests/test_ledger.py`, `tests/test_ledger_api.py`, `tests/test_csv_export.py`).
+- **PDF Upload:** first-page render, converted-document flag, size gate (`tests/test_pdf_upload.py`).
 
 ## Security and Privacy
 

@@ -18,6 +18,7 @@
 			<a href="#screening">&#9678; New screening</a>
 			<a href="#queue">&#9776; Review queue <em id="queue-badge">--</em></a>
 			<a href="#watchlists">&#10003; Watchlists</a>
+			<a href="#ledger">&#8734; Ledger</a>
 		</nav>
 		<div class="side-bottom">
 			<div id="settings-panel">
@@ -52,7 +53,10 @@
 				<button id="btn-header-login" type="button" aria-label="Officer Sign in">
 					<span>&#128100;</span> <span id="header-auth-label">Sign In</span>
 				</button>
-				<button class="icon-btn" id="notifications" type="button" aria-label="Show notifications">&#128276;</button>
+				<div class="notif-wrap">
+					<button class="icon-btn" id="notifications" type="button" aria-label="Show notifications">&#128276;<em id="notif-badge" hidden></em></button>
+					<div class="notif-panel" id="notif-panel" hidden></div>
+				</div>
 				<button class="icon-btn help" id="help" type="button" aria-label="Show help">?</button>
 			</div>
 		</header>
@@ -131,12 +135,13 @@
 						<h3 id="drop-title">Drop a document to begin</h3>
 						<p id="drop-subtitle">or select a file from this device</p>
 						<button class="outline" id="browse" type="button">Browse files</button>
-						<input id="files" type="file" hidden accept="image/jpeg,image/png,image/webp">
-						<small>JPG, PNG or WebP <span>Max 10 MB</span></small>
+						<input id="files" type="file" hidden accept="image/jpeg,image/png,image/webp,application/pdf">
+						<small>JPG · PNG · WebP <span>10 MB</span> &nbsp;|&nbsp; PDF <span>20 MB</span></small>
 					</div>
 					<label class="accepted">Accepted documents</label>
 					<div class="types">
 						<button class="selected" type="button" data-type="passport">&#9635; Passport</button>
+						<button type="button" data-type="visa">&#9670; Visa (TD2)</button>
 						<button type="button" data-type="national_id">&#9633; National ID</button>
 						<button type="button" data-type="pan">&#9642; Aadhaar / PAN</button>
 					</div>
@@ -176,7 +181,10 @@
 						<small class="kicker">REPORT SUMMARY</small>
 						<h2>All-time screening report</h2>
 					</div>
-					<small>PostgreSQL audit trail</small>
+					<div class="report-actions">
+						<button class="filter" id="btn-export-csv" type="button">&#8595; Export CSV</button>
+						<small>PostgreSQL audit trail</small>
+					</div>
 				</div>
 				<div class="report-stats">
 					<span><small>Total screenings</small><b id="report-total">--</b></span>
@@ -188,6 +196,65 @@
 				<div class="report-breakdown">
 					<span>By decision <span id="report-by-decision" class="tags"></span></span>
 					<span>By risk level <span id="report-by-risk" class="tags"></span></span>
+				</div>
+			</section>
+
+			<section class="panel ledger-section" id="ledger">
+				<div class="panel-title">
+					<div>
+						<small class="kicker">TAMPER-PROOF LOG</small>
+						<h2>Integrity ledger</h2>
+					</div>
+					<button class="filter" id="btn-ledger-verify" type="button">&#10003; Verify integrity</button>
+				</div>
+				<div class="ledger-head" id="ledger-head-card">
+					<span><small>Entry index</small><b id="ledger-index">--</b></span>
+					<span><small>Entry type</small><b id="ledger-type">--</b></span>
+					<span class="wide"><small>Head hash (SHA-256)</small><b id="ledger-hash">--</b></span>
+					<span><small>Created</small><b id="ledger-created">--</b></span>
+				</div>
+				<div class="verify-banner" id="ledger-verify-result" hidden></div>
+				<div class="table">
+					<table>
+						<thead>
+							<tr><th>Index</th><th>Type</th><th>Record hash</th><th>Created</th></tr>
+						</thead>
+						<tbody id="ledger-rows">
+							<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Loading ledger&hellip;</td></tr>
+						</tbody>
+					</table>
+				</div>
+			</section>
+
+			<section class="panel watchlist-panel" id="watchlists">
+				<div class="panel-title">
+					<div>
+						<small class="kicker">WATCHLISTS</small>
+						<h2>Flagged entities</h2>
+					</div>
+					<small id="watchlist-count">Loading&hellip;</small>
+				</div>
+				<form class="watchlist-add" id="watchlist-add-form">
+					<input id="wl-name" name="name" placeholder="Full name (e.g. Aryan Rathore)" required>
+					<input id="wl-doc" name="document_number" placeholder="Document number (e.g. L898902C3)" required>
+					<input id="wl-reason" name="reason" placeholder="Reason / case reference">
+					<select id="wl-severity" name="severity">
+						<option value="LOW">LOW</option>
+						<option value="MEDIUM" selected>MEDIUM</option>
+						<option value="HIGH">HIGH</option>
+						<option value="CRITICAL">CRITICAL</option>
+					</select>
+					<button class="primary" type="submit">+ Add entry</button>
+				</form>
+				<div class="table">
+					<table>
+						<thead>
+							<tr><th>Name</th><th>Document number</th><th>Severity</th><th>Source</th><th>Reason</th><th>Created</th><th></th></tr>
+						</thead>
+						<tbody id="watchlist-rows">
+							<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Loading watchlists&hellip;</td></tr>
+						</tbody>
+					</table>
 				</div>
 			</section>
 
@@ -261,7 +328,12 @@
 		// ==========================================================================
 		// 1. CONFIGURATION & SAFE STORAGE
 		// ==========================================================================
-		const API_BASE = 'https://document-screening-system-3tvd.onrender.com';
+		const API_BASE = (function () {
+			const override = new URLSearchParams(location.search).get('api');
+			if (override) return override.replace(/\/+$/, '');
+			if (location.protocol === 'file:') return 'https://document-screening-system-3tvd.onrender.com';
+			return ''; // same-origin: API is reverse-proxied by server.py / hosting
+		})();
 		
 		const safeStorage = {
 			get(key) {
@@ -978,8 +1050,10 @@
 		});
 
 		async function handleScreeningSubmission(file) {
-			if (file.size > 10 * 1024 * 1024) {
-				showToast('File exceeds maximum size of 10 MB');
+			const isPdf = file.type === 'application/pdf';
+			const maxBytes = isPdf ? 20 * 1024 * 1024 : 10 * 1024 * 1024;
+			if (file.size > maxBytes) {
+				showToast(isPdf ? 'PDF exceeds maximum size of 20 MB' : 'File exceeds maximum size of 10 MB');
 				return;
 			}
 
@@ -1086,20 +1160,62 @@
 			showToast('Viewing all screenings');
 		};
 
-		document.querySelector('#notifications').onclick = async () => {
+		const notifButton = document.querySelector('#notifications');
+		const notifBadge = document.querySelector('#notif-badge');
+		const notifPanel = document.querySelector('#notif-panel');
+
+		function renderNotifPanel(items) {
+			if (!notifPanel) return;
+			if (!items.length) {
+				notifPanel.innerHTML = '<div class="notif-empty">No new notifications</div>';
+				return;
+			}
+			notifPanel.innerHTML = items.map(n => {
+				const when = n.created_at ? new Date(n.created_at).toLocaleString() : '';
+				return `<button type="button" class="notif-item" data-id="${esc(n.id)}"><strong>${esc(n.type || 'ALERT')}</strong><span>${esc(n.message || '')}</span><small>${esc(when)}</small></button>`;
+			}).join('');
+			notifPanel.querySelectorAll('.notif-item').forEach(btn => {
+				btn.onclick = async () => {
+					await apiRequest(`/api/v1/notifications/${encodeURIComponent(btn.getAttribute('data-id'))}/read`, { method: 'PATCH', silent: true });
+					await refreshNotifications();
+				};
+			});
+		}
+
+		async function refreshNotifications() {
+			if (!authToken) {
+				if (notifBadge) notifBadge.hidden = true;
+				if (notifPanel) notifPanel.hidden = true;
+				return;
+			}
+			const res = await apiRequest('/api/v1/notifications?unread_only=true', { silent: true });
+			const items = res.ok && Array.isArray(res.data) ? res.data : [];
+			if (notifBadge) {
+				notifBadge.hidden = items.length === 0;
+				notifBadge.textContent = items.length > 9 ? '9+' : String(items.length);
+			}
+			renderNotifPanel(items);
+		}
+
+		notifButton.onclick = async () => {
 			if (!authToken) {
 				showToast('Sign in with your officer credentials first');
 				openLoginModal();
 				return;
 			}
-			const res = await apiRequest('/api/v1/notifications', { silent: true });
-			if (res.ok) {
-				const items = Array.isArray(res.data) ? res.data : [];
-				showToast(items.length ? `${items.length} notification${items.length === 1 ? '' : 's'} from central command` : 'No new notifications');
+			if (notifPanel.hidden) {
+				await refreshNotifications();
+				notifPanel.hidden = false;
 			} else {
-				showToast('Could not load notifications from backend');
+				notifPanel.hidden = true;
 			}
 		};
+
+		document.addEventListener('click', event => {
+			if (notifPanel && !notifPanel.hidden && !notifButton.contains(event.target) && !notifPanel.contains(event.target)) {
+				notifPanel.hidden = true;
+			}
+		});
 
 		document.querySelector('#help').onclick = () => {
 			showToast('Instructions: 1. Add selfie portrait (optional) 2. Select document type 3. Upload document to screen');
@@ -1108,29 +1224,17 @@
 		document.querySelectorAll('nav a').forEach(link => {
 			link.onclick = async event => {
 				const targetId = link.getAttribute('href');
-				if (targetId === '#watchlists') {
-					event.preventDefault();
-					if (!authToken) {
-						showToast('Sign in with your officer credentials first');
-						openLoginModal();
-						return;
-					}
-					const res = await apiRequest('/api/v1/watchlists', { silent: true });
-					if (res.ok) {
-						const items = Array.isArray(res.data) ? res.data : [];
-						showToast(`Watchlists active · ${items.length} flagged entr${items.length === 1 ? 'y' : 'ies'} monitored`);
-					} else {
-						showToast('Could not load watchlists from backend');
-					}
-					return;
-				}
-
 				const target = document.querySelector(targetId);
 				if (target) {
 					event.preventDefault();
 					document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
 					link.classList.add('active');
 					target.scrollIntoView({ behavior: 'smooth' });
+					if (targetId === '#watchlists' && authToken) {
+						await renderWatchlists();
+					} else if (targetId === '#ledger' && authToken) {
+						await renderLedger();
+					}
 				} else {
 					event.preventDefault();
 					showToast(link.textContent.replace(/[^a-zA-Z\s]/g, '').trim() + ' section active');
@@ -1138,10 +1242,203 @@
 			};
 		});
 
-		// Live timestamp: reflects the officer's local date & time, so the wall
-		// clock head matches real-world time (IST for this terminal). Uses
-		// Intl.formatToParts -- toLocaleDateString() silently drops time
-		// options per spec, which left a stale hardcoded value on screen.
+		// ==========================================================================
+		// 10b. WATCHLISTS, LEDGER & CSV EXPORT
+		// ==========================================================================
+		const watchlistRows = document.querySelector('#watchlist-rows');
+		const watchlistCount = document.querySelector('#watchlist-count');
+		const watchlistAddForm = document.querySelector('#watchlist-add-form');
+
+		function watchlistRow(item) {
+			const tr = document.createElement('tr');
+			const sev = String(item.severity || 'MEDIUM').toUpperCase();
+			const when = item.created_at ? new Date(item.created_at).toLocaleString() : '—';
+			const sourceBadge = item.is_demo_data
+				? '<mark>Demo</mark>'
+				: '<mark>' + esc(String(item.source || 'MANUAL_ENTRY').replace(/_/g, ' ')) + '</mark>';
+			tr.innerHTML = `
+				<td><strong>${esc(item.name || '—')}</strong></td>
+				<td><span class="mono">${esc(item.document_number || '—')}</span></td>
+				<td><select class="wl-sev" data-id="${esc(item.id)}" data-sev="${esc(sev)}">
+					${['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map(s => `<option value="${s}" ${s === sev ? 'selected' : ''}>${s}</option>`).join('')}
+				</select></td>
+				<td>${sourceBadge}</td>
+				<td style="white-space:normal;min-width:160px">${esc(item.reason || '—')}</td>
+				<td>${esc(when)}</td>
+				<td><button class="row-menu wl-delete" type="button" data-id="${esc(item.id)}" aria-label="Delete watchlist entry">Delete</button></td>`;
+			const sevSelect = tr.querySelector('.wl-sev');
+			sevSelect.onchange = async () => {
+				const res = await apiRequest(`/api/v1/watchlists/${encodeURIComponent(sevSelect.getAttribute('data-id'))}`, {
+					method: 'PATCH', json: { severity: sevSelect.value }
+				});
+				showToast(res.ok ? 'Severity updated to ' + sevSelect.value : 'Could not update severity');
+				if (res.ok) await renderWatchlists();
+			};
+			const delBtn = tr.querySelector('.wl-delete');
+			delBtn.onclick = async () => {
+				if (!window.confirm('Delete this watchlist entry?')) return;
+				const res = await apiRequest(`/api/v1/watchlists/${encodeURIComponent(delBtn.getAttribute('data-id'))}`, { method: 'DELETE' });
+				showToast(res.ok ? 'Watchlist entry removed' : 'Could not remove entry');
+				if (res.ok) await renderWatchlists();
+			};
+			return tr;
+		}
+
+		async function renderWatchlists() {
+			if (!watchlistRows) return;
+			if (!authToken) {
+				watchlistRows.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Sign in to view watchlists</td></tr>';
+				return;
+			}
+			watchlistRows.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Loading watchlists&hellip;</td></tr>';
+			const res = await apiRequest('/api/v1/watchlists', { silent: true });
+			if (!res.ok || !Array.isArray(res.data)) {
+				watchlistRows.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Watchlists unavailable</td></tr>';
+				return;
+			}
+			watchlistRows.innerHTML = '';
+			res.data.forEach(item => watchlistRows.appendChild(watchlistRow(item)));
+			if (watchlistCount) watchlistCount.textContent = res.data.length + ' flagg' + (res.data.length === 1 ? 'ed entity' : 'ed entities');
+			if (res.data.length === 0) {
+				watchlistRows.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">No watchlist entries yet — add one above</td></tr>';
+			}
+		}
+
+		if (watchlistAddForm) {
+			watchlistAddForm.onsubmit = async event => {
+				event.preventDefault();
+				if (!authToken) {
+					showToast('Sign in with your officer credentials first');
+					openLoginModal();
+					return;
+				}
+				const name = document.querySelector('#wl-name').value.trim();
+				const docNumber = document.querySelector('#wl-doc').value.trim();
+				const reason = document.querySelector('#wl-reason').value.trim();
+				const severity = document.querySelector('#wl-severity').value;
+				const res = await apiRequest('/api/v1/watchlists', {
+					method: 'POST',
+					json: { name, document_number: docNumber, reason, severity }
+				});
+				if (res.ok) {
+					showToast('Watchlist entry added and live for screening match');
+					watchlistAddForm.reset();
+					await renderWatchlists();
+				} else {
+					showToast('Could not add entry: ' + res.message);
+				}
+			};
+		}
+
+		const ledgerIndexEl = document.querySelector('#ledger-index');
+		const ledgerTypeEl = document.querySelector('#ledger-type');
+		const ledgerHashEl = document.querySelector('#ledger-hash');
+		const ledgerCreatedEl = document.querySelector('#ledger-created');
+		const ledgerRowsEl = document.querySelector('#ledger-rows');
+		const ledgerVerifyBtn = document.querySelector('#btn-ledger-verify');
+		const ledgerVerifyResult = document.querySelector('#ledger-verify-result');
+
+		function shortHash(hash) {
+			return hash && hash.length > 16 ? hash.slice(0, 10) + '&hellip;' + hash.slice(-8) : (hash || '—');
+		}
+
+		async function renderLedger() {
+			if (!ledgerRowsEl) return;
+			if (!authToken) return;
+			const head = await apiRequest('/api/v1/ledger/head', { silent: true });
+			if (head.ok && head.data) {
+				if (ledgerIndexEl) ledgerIndexEl.textContent = head.data.entry_index;
+				if (ledgerTypeEl) ledgerTypeEl.textContent = head.data.entry_type || '—';
+				if (ledgerHashEl) ledgerHashEl.title = head.data.entry_hash || '';
+				if (ledgerHashEl) ledgerHashEl.textContent = shortHash(head.data.entry_hash);
+				if (ledgerCreatedEl) ledgerCreatedEl.textContent = head.data.created_at ? new Date(head.data.created_at).toLocaleString() : '—';
+			}
+			const list = await apiRequest('/api/v1/ledger?limit=20', { silent: true });
+			if (list.ok && list.data && Array.isArray(list.data.items)) {
+				ledgerRowsEl.innerHTML = '';
+				if (list.data.items.length === 0) {
+					ledgerRowsEl.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:28px 0;font-size:12px">Ledger empty</td></tr>';
+					return;
+				}
+				list.data.items.forEach(e => {
+					const tr = document.createElement('tr');
+					const when = e.created_at ? new Date(e.created_at).toLocaleString() : '—';
+					tr.innerHTML = `<td><strong>${esc(e.entry_index)}</strong></td>
+						<td><span class="mono">${esc(e.entry_type || '—')}</span></td>
+						<td><span class="mono" title="${esc(e.entry_hash || '')}">${shortHash(e.entry_hash)}</span></td>
+						<td>${esc(when)}</td>`;
+					ledgerRowsEl.appendChild(tr);
+				});
+			}
+		}
+
+		if (ledgerVerifyBtn) {
+			ledgerVerifyBtn.onclick = async () => {
+				if (!authToken) {
+					showToast('Sign in with your officer credentials first');
+					openLoginModal();
+					return;
+				}
+				ledgerVerifyBtn.textContent = 'Verifying...';
+				ledgerVerifyBtn.disabled = true;
+				try {
+					const res = await apiRequest('/api/v1/ledger/verify', { silent: true });
+					if (res.ok && res.data) {
+						const ok = res.data.valid === true;
+						const checked = res.data.checked ?? '—';
+						const brokenAt = res.data.broken_at;
+						ledgerVerifyResult.hidden = false;
+						ledgerVerifyResult.className = 'verify-banner ' + (ok ? 'ok' : 'bad');
+						ledgerVerifyResult.innerHTML = ok
+							? `<b>&#10003; Ledger verified</b><span>${checked} entr${checked === 1 ? 'y' : 'ies'} checked — hash chain complete and unbroken.</span>`
+							: `<b>&#10007; Ledger BROKEN</b><span>Integrity failure at entry ${esc(brokenAt)} — investigation required.</span>`;
+						showToast(ok ? 'Ledger integrity verified' : 'Ledger integrity FAILED');
+					} else {
+						showToast('Could not verify ledger: ' + res.message);
+					}
+				} finally {
+					ledgerVerifyBtn.textContent = '\u2713 Verify integrity';
+					ledgerVerifyBtn.disabled = false;
+				}
+			};
+		}
+
+		const exportCsvBtn = document.querySelector('#btn-export-csv');
+		if (exportCsvBtn) {
+			exportCsvBtn.onclick = async () => {
+				if (!authToken) {
+					showToast('Sign in with your officer credentials first');
+					openLoginModal();
+					return;
+				}
+				exportCsvBtn.textContent = 'Exporting...';
+				exportCsvBtn.disabled = true;
+				try {
+					const response = await fetch(`${API_BASE}/api/v1/report/export.csv`, {
+						method: 'GET',
+						headers: getAuthHeaders()
+					});
+					if (!response.ok) {
+						showToast('Export failed (' + response.status + ')');
+						return;
+					}
+					const blob = await response.blob();
+					const a = document.createElement('a');
+					a.href = URL.createObjectURL(blob);
+					a.download = 'sentinel-export.csv';
+					document.body.appendChild(a);
+					a.click();
+					a.remove();
+					URL.revokeObjectURL(a.href);
+					showToast('CSV export downloaded');
+				} catch (err) {
+					showToast('Export failed — backend unreachable');
+				} finally {
+					exportCsvBtn.textContent = '\u2193 Export CSV';
+					exportCsvBtn.disabled = false;
+				}
+			};
+		}
 		function updateTimestamp() {
 			const now = new Date();
 			const dateFormatter = new Intl.DateTimeFormat('en-GB', {
@@ -1166,7 +1463,8 @@
 			await Promise.allSettled([
 				fetchDashboardStats('24h'),
 				fetchRecentScreenings(),
-				fetchReportSummary()
+				fetchReportSummary(),
+				refreshNotifications()
 			]);
 		}
 
